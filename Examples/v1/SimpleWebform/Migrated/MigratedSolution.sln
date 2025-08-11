@@ -1,0 +1,21 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "YourApp.Models", "YourApp.Models\YourApp.Models.csproj", "{EC5FC6F6-5855-4DBA-ADE1-1F10440D7157}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "YourApp.DataAccess", "YourApp.DataAccess\YourApp.DataAccess.csproj", "{3F0D30E9-C117-4710-95AA-DB45797967D0}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "YourApp.Business", "YourApp.Business\YourApp.Business.csproj", "{71758E44-C983-4230-A337-022C0EB8A8BB}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "YourApp.Web", "YourApp.Web\YourApp.Web.csproj", "{194D9E13-6068-46BC-9C41-F024426BD46C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "YourApp.Common", "YourApp.Common\YourApp.Common.csproj", "{A74B51EA-1A9E-47BB-9005-0F98BC77DA6D}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+EndGlobal
