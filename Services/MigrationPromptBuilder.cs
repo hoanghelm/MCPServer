@@ -12,11 +12,13 @@ namespace CSharpLegacyMigrationMCP.Services
 	public class MigrationPromptBuilder : IMigrationPromptBuilder
 	{
 		private readonly IDependencyAnalyzer _dependencyAnalyzer;
+		private readonly IArchitectureAnalyzer _architectureAnalyzer;
 		private readonly ILogger<MigrationPromptBuilder> _logger;
 
-		public MigrationPromptBuilder(IDependencyAnalyzer dependencyAnalyzer, ILogger<MigrationPromptBuilder> logger)
+		public MigrationPromptBuilder(IDependencyAnalyzer dependencyAnalyzer, IArchitectureAnalyzer architectureAnalyzer, ILogger<MigrationPromptBuilder> logger)
 		{
 			_dependencyAnalyzer = dependencyAnalyzer;
+			_architectureAnalyzer = architectureAnalyzer;
 			_logger = logger;
 		}
 
@@ -39,6 +41,10 @@ namespace CSharpLegacyMigrationMCP.Services
 			prompt.AppendLine($"- BAL Project: {projectName}.BAL");
 			prompt.AppendLine($"- Database: PostgreSQL (using Npgsql)");
 			prompt.AppendLine();
+
+			// Analyze existing project architecture
+			var architecture = await _architectureAnalyzer.AnalyzeProjectArchitectureAsync(Path.GetDirectoryName(file.FilePath) ?? "");
+			AddArchitectureAnalysis(prompt, architecture, projectName);
 
 			// Get project paths and existing structure
 			var projectInfo = GetProjectStructureInfo(project);
@@ -283,6 +289,169 @@ namespace CSharpLegacyMigrationMCP.Services
 			}
 
 			return name;
+		}
+
+		private void AddArchitectureAnalysis(StringBuilder prompt, ProjectArchitecture architecture, string projectName)
+		{
+			prompt.AppendLine("🏗️ EXISTING PROJECT ARCHITECTURE ANALYSIS:");
+			prompt.AppendLine($"**Extraction Strategy: {architecture.ExtractionStrategy}**");
+			
+			switch (architecture.ExtractionStrategy)
+			{
+				case ExtractionStrategy.ReuseAndEnhance:
+					prompt.AppendLine("✅ GOOD SEPARATION DETECTED - Reuse and enhance existing patterns:");
+					AddReuseAndEnhanceInstructions(prompt, architecture, projectName);
+					break;
+
+				case ExtractionStrategy.ModernizeDataSets:
+					prompt.AppendLine("🔄 DATASET USAGE DETECTED - Modernize to proper DAL pattern:");
+					AddModernizeDataSetsInstructions(prompt, architecture, projectName);
+					break;
+
+				case ExtractionStrategy.ExtendExisting:
+					prompt.AppendLine("🔧 PARTIAL SEPARATION DETECTED - Extend existing architecture:");
+					AddExtendExistingInstructions(prompt, architecture, projectName);
+					break;
+
+				case ExtractionStrategy.FullExtraction:
+					prompt.AppendLine("🆕 NO SEPARATION DETECTED - Full extraction from WebForms:");
+					AddFullExtractionInstructions(prompt, architecture, projectName);
+					break;
+			}
+			prompt.AppendLine();
+		}
+
+		private void AddReuseAndEnhanceInstructions(StringBuilder prompt, ProjectArchitecture architecture, string projectName)
+		{
+			prompt.AppendLine("**REUSE STRATEGY:**");
+			
+			if (architecture.ExistingDataAccessFiles.Any())
+			{
+				prompt.AppendLine("📁 EXISTING DATA ACCESS FILES TO MODERNIZE:");
+				foreach (var dalFile in architecture.ExistingDataAccessFiles.Take(5))
+				{
+					prompt.AppendLine($"  - {dalFile.FilePath} ({dalFile.Pattern}) - Modernize and move to {projectName}.DAL");
+				}
+			}
+
+			if (architecture.ExistingBusinessLogicFiles.Any())
+			{
+				prompt.AppendLine("📁 EXISTING BUSINESS LOGIC FILES TO MODERNIZE:");
+				foreach (var balFile in architecture.ExistingBusinessLogicFiles.Take(5))
+				{
+					prompt.AppendLine($"  - {balFile.FilePath} ({balFile.Pattern}) - Modernize and move to {projectName}.BAL");
+				}
+			}
+
+			prompt.AppendLine("**MODERNIZATION REQUIREMENTS:**");
+			prompt.AppendLine("- Update to async/await patterns");
+			prompt.AppendLine("- Convert to PostgreSQL (Npgsql 3.2.7)");
+			prompt.AppendLine("- Apply dependency injection pattern");
+			prompt.AppendLine("- Add proper error handling and logging");
+			prompt.AppendLine("- Follow netcoreapp2.0 compatibility");
+		}
+
+		private void AddModernizeDataSetsInstructions(StringBuilder prompt, ProjectArchitecture architecture, string projectName)
+		{
+			prompt.AppendLine("**DATASET MODERNIZATION STRATEGY:**");
+			
+			foreach (var dataSetFile in architecture.DataSetFiles.Take(3))
+			{
+				prompt.AppendLine($"📊 DATASET FILE: {dataSetFile.FilePath}");
+				
+				if (dataSetFile.TableAdapters.Any())
+				{
+					prompt.AppendLine("  **TableAdapters to Convert:**");
+					foreach (var adapter in dataSetFile.TableAdapters.Take(5))
+					{
+						prompt.AppendLine($"    - {adapter}TableAdapter → {adapter}DAL.cs in {projectName}.DAL/DataAccess/");
+					}
+				}
+
+				if (dataSetFile.DataTables.Any())
+				{
+					prompt.AppendLine("  **DataTables to Convert:**");
+					foreach (var table in dataSetFile.DataTables.Take(5))
+					{
+						prompt.AppendLine($"    - {table}DataTable → {table}.cs model in {projectName}.DAL/Models/");
+					}
+				}
+			}
+
+			prompt.AppendLine("**CONVERSION REQUIREMENTS:**");
+			prompt.AppendLine("- Replace TableAdapter.Fill() with async repository methods");
+			prompt.AppendLine("- Convert DataTable to strongly-typed models");
+			prompt.AppendLine("- Replace DataSet operations with direct SQL using Npgsql");
+			prompt.AppendLine("- Implement proper connection management");
+		}
+
+		private void AddExtendExistingInstructions(StringBuilder prompt, ProjectArchitecture architecture, string projectName)
+		{
+			prompt.AppendLine("**EXTEND EXISTING STRATEGY:**");
+			
+			if (architecture.HasExistingDataLayer && !architecture.HasExistingBusinessLayer)
+			{
+				prompt.AppendLine("✅ HAS DATA LAYER - Focus on creating business layer:");
+				prompt.AppendLine($"- Reuse existing data access patterns");
+				prompt.AppendLine($"- Create new business logic layer in {projectName}.BAL");
+				prompt.AppendLine($"- Extract business logic from WebForms to BAL");
+			}
+			else if (!architecture.HasExistingDataLayer && architecture.HasExistingBusinessLayer)
+			{
+				prompt.AppendLine("✅ HAS BUSINESS LAYER - Focus on creating data layer:");
+				prompt.AppendLine($"- Create proper data access layer in {projectName}.DAL");
+				prompt.AppendLine($"- Extract data operations from WebForms to DAL");
+				prompt.AppendLine($"- Update business layer to use new DAL");
+			}
+
+			if (architecture.ExistingLayerFolders.Any())
+			{
+				prompt.AppendLine("📂 EXISTING LAYER FOLDERS DETECTED:");
+				foreach (var folder in architecture.ExistingLayerFolders.Take(5))
+				{
+					prompt.AppendLine($"  - {folder} - Consider migrating content to new projects");
+				}
+			}
+		}
+
+		private void AddFullExtractionInstructions(StringBuilder prompt, ProjectArchitecture architecture, string projectName)
+		{
+			prompt.AppendLine("**FULL EXTRACTION STRATEGY:**");
+			
+			var webFormsWithLogic = architecture.WebFormFiles.Where(wf => wf.HasDataAccess || wf.HasBusinessLogic).ToList();
+			
+			if (webFormsWithLogic.Any())
+			{
+				prompt.AppendLine("📄 WEBFORMS WITH EXTRACTABLE LOGIC:");
+				foreach (var webForm in webFormsWithLogic.Take(5))
+				{
+					prompt.AppendLine($"  **{webForm.FilePath}:**");
+					
+					if (webForm.HasDataAccess)
+					{
+						prompt.AppendLine($"    - Extract data access → {projectName}.DAL");
+						foreach (var dbOp in webForm.DatabaseOperations.Take(3))
+						{
+							prompt.AppendLine($"      • {dbOp}");
+						}
+					}
+					
+					if (webForm.HasBusinessLogic)
+					{
+						prompt.AppendLine($"    - Extract business logic → {projectName}.BAL");
+						foreach (var bizOp in webForm.BusinessOperations.Take(3))
+						{
+							prompt.AppendLine($"      • {bizOp}");
+						}
+					}
+				}
+			}
+
+			prompt.AppendLine("**EXTRACTION REQUIREMENTS:**");
+			prompt.AppendLine("- Move ALL database operations to DAL layer");
+			prompt.AppendLine("- Move ALL business logic to BAL layer");
+			prompt.AppendLine("- Keep only UI presentation logic in WebForms");
+			prompt.AppendLine("- Create proper interfaces for dependency injection");
 		}
 
 		private ProjectStructureInfo GetProjectStructureInfo(MigrationProject project)

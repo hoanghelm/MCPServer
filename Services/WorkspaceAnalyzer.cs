@@ -12,11 +12,13 @@ namespace CSharpLegacyMigrationMCP.Services
 	{
 		private readonly ILogger<WorkspaceAnalyzer> _logger;
 		private readonly IDataRepository _repository;
+		private readonly IArchitectureAnalyzer _architectureAnalyzer;
 
-		public WorkspaceAnalyzer(ILogger<WorkspaceAnalyzer> logger, IDataRepository repository)
+		public WorkspaceAnalyzer(ILogger<WorkspaceAnalyzer> logger, IDataRepository repository, IArchitectureAnalyzer architectureAnalyzer)
 		{
 			_logger = logger;
 			_repository = repository;
+			_architectureAnalyzer = architectureAnalyzer;
 		}
 
 		public async Task<WorkspaceAnalysis> AnalyzeWorkspaceAsync(string workspacePath)
@@ -38,6 +40,10 @@ namespace CSharpLegacyMigrationMCP.Services
 
 				// Find and analyze all relevant files (C# and VB.NET)
 				await FindAndAnalyzeFilesAsync(workspacePath, analysis);
+
+				// Analyze existing project architecture
+				var architecture = await _architectureAnalyzer.AnalyzeProjectArchitectureAsync(workspacePath);
+				analysis.ProjectArchitecture = architecture;
 
 				// Calculate statistics
 				CalculateStatistics(analysis);

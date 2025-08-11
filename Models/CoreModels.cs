@@ -86,6 +86,7 @@ namespace CSharpLegacyMigrationMCP.Models
 		public List<ProjectFile> BusinessLogicFiles { get; set; } = new List<ProjectFile>();
 		public Dictionary<string, int> FilesByType { get; set; } = new Dictionary<string, int>();
 		public Dictionary<string, int> FilesByComplexity { get; set; } = new Dictionary<string, int>();
+		public ProjectArchitecture ProjectArchitecture { get; set; }
 	}
 
 	public class MigrationProject
