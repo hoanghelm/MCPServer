@@ -36,6 +36,7 @@ namespace CSharpLegacyMigrationMCP
 			_tools["get_file_list"] = HandleGetFileList;
 			_tools["retry_failed_files"] = HandleRetryFailedFiles;
 			_tools["get_project_structure"] = HandleGetProjectStructure;
+			_tools["validate_project_health"] = HandleValidateProjectHealth;
 		}
 
 		public async Task<string> ProcessRequest(string jsonRequest)
@@ -400,6 +401,36 @@ namespace CSharpLegacyMigrationMCP
 
 				var repository = _serviceProvider.GetRequiredService<IDataRepository>();
 				var migrator = _serviceProvider.GetRequiredService<IFileMigrator>();
+				var validator = _serviceProvider.GetRequiredService<IMigrationValidator>();
+
+				// STEP 1: Pre-migration validation
+				_logger.LogInformation($"Running pre-migration validation for project: {projectId}");
+				var validationResult = await validator.ValidateBeforeMigrationAsync(projectId);
+
+				if (!validationResult.IsValid)
+				{
+					_logger.LogWarning($"Pre-migration validation failed with {validationResult.Issues.Count} issues");
+					return new
+					{
+						success = false,
+						validation_failed = true,
+						issues = validationResult.Issues,
+						warnings = validationResult.Warnings,
+						message = "Pre-migration validation failed. Please fix the issues before continuing.",
+						original_project_state = validationResult.OriginalProjectState,
+						migrated_project_state = validationResult.MigratedProjectState
+					};
+				}
+
+				// Log validation summary
+				if (validationResult.Warnings.Any())
+				{
+					_logger.LogInformation($"Pre-migration validation passed with {validationResult.Warnings.Count} warnings");
+				}
+				else
+				{
+					_logger.LogInformation("Pre-migration validation passed successfully");
+				}
 
 				// Get next unmigrated file
 				var file = await repository.GetNextUnmigratedFileAsync(projectId);
@@ -436,6 +467,27 @@ namespace CSharpLegacyMigrationMCP
 				return new
 				{
 					success = true,
+					validation_summary = new
+					{
+						validated = true,
+						warnings_count = validationResult.Warnings.Count,
+						warnings = validationResult.Warnings,
+						original_project = new
+						{
+							total_cs_files = validationResult.OriginalProjectState?.TotalCsFiles ?? 0,
+							total_aspx_files = validationResult.OriginalProjectState?.TotalAspxFiles ?? 0,
+							has_existing_dal = validationResult.OriginalProjectState?.HasExistingDAL ?? false,
+							has_existing_bal = validationResult.OriginalProjectState?.HasExistingBAL ?? false,
+							extraction_strategy = validationResult.OriginalProjectState?.Architecture?.ExtractionStrategy.ToString()
+						},
+						migrated_project = new
+						{
+							total_migrated = validationResult.MigratedProjectState?.TotalMigratedFiles ?? 0,
+							dal_files = validationResult.MigratedProjectState?.DalFilesCount ?? 0,
+							bal_files = validationResult.MigratedProjectState?.BalFilesCount ?? 0
+						},
+						good_dependencies = validationResult.GoodDependencies
+					},
 					file_info = new
 					{
 						file_id = file.Id,
@@ -454,6 +506,9 @@ namespace CSharpLegacyMigrationMCP
 					instructions = new
 					{
 						message = "Process the migration_prompt with AI. The AI should write files directly to the specified project paths.",
+						validation_note = validationResult.Warnings.Any() ? 
+							$"⚠️ {validationResult.Warnings.Count} warnings detected - check validation_summary for details" : 
+							"✅ All validation checks passed",
 						next_step = "After AI completes file writing, call 'complete_file_migration' with the file_id to mark as completed",
 						ai_instructions = "The AI has direct file system access and should create files immediately at the specified DAL/BAL project paths."
 					}
@@ -485,6 +540,7 @@ namespace CSharpLegacyMigrationMCP
 
 				var repository = _serviceProvider.GetRequiredService<IDataRepository>();
 				var migrator = _serviceProvider.GetRequiredService<IFileMigrator>();
+				var validator = _serviceProvider.GetRequiredService<IMigrationValidator>();
 
 				// Get the file and project
 				var files = await repository.GetProjectFilesAsync(projectId);
@@ -499,6 +555,31 @@ namespace CSharpLegacyMigrationMCP
 
 				// Process completion (this will verify created files)
 				var result = await migrator.ProcessAiResponseAsync(file, project, migrationNotes ?? "Migration completed");
+
+				// STEP 2: Post-migration validation (only if migration was successful)
+				if (result.Success)
+				{
+					_logger.LogInformation($"Running post-migration validation for file: {file.FileName}");
+					var postValidation = await validator.ValidateAfterMigrationAsync(file, project);
+					
+					if (!postValidation.IsValid)
+					{
+						_logger.LogWarning($"Post-migration validation failed for file: {file.FileName}");
+						return new
+						{
+							success = false,
+							post_validation_failed = true,
+							issues = postValidation.Issues,
+							message = "File migration completed but post-validation failed",
+							file_info = new
+							{
+								file_path = file.FilePath,
+								file_name = file.FileName,
+								file_type = file.FileType
+							}
+						};
+					}
+				}
 
 				return new
 				{
@@ -785,6 +866,124 @@ namespace CSharpLegacyMigrationMCP
 				_logger.LogWarning(ex, $"Error scanning existing files: {projectPath}");
 				return new { exists = false, error = ex.Message };
 			}
+		}
+
+		private async Task<object> HandleValidateProjectHealth(JObject args)
+		{
+			try
+			{
+				var projectId = args["project_id"]?.ToString();
+
+				if (string.IsNullOrEmpty(projectId))
+				{
+					throw new ArgumentException("project_id is required");
+				}
+
+				var validator = _serviceProvider.GetRequiredService<IMigrationValidator>();
+				var repository = _serviceProvider.GetRequiredService<IDataRepository>();
+
+				_logger.LogInformation($"Running comprehensive health check for project: {projectId}");
+
+				// Run full validation
+				var validationResult = await validator.ValidateBeforeMigrationAsync(projectId);
+				var project = await repository.GetMigrationProjectAsync(projectId);
+
+				return new
+				{
+					success = true,
+					project_id = projectId,
+					health_status = validationResult.IsValid ? "healthy" : "issues_detected",
+					validation_summary = new
+					{
+						is_valid = validationResult.IsValid,
+						issues_count = validationResult.Issues.Count,
+						warnings_count = validationResult.Warnings.Count,
+						validated_at = validationResult.ValidatedAt
+					},
+					original_project = new
+					{
+						path = project?.WorkspacePath,
+						total_cs_files = validationResult.OriginalProjectState?.TotalCsFiles ?? 0,
+						total_aspx_files = validationResult.OriginalProjectState?.TotalAspxFiles ?? 0,
+						has_datasets = validationResult.OriginalProjectState?.HasDataSets ?? false,
+						has_existing_dal = validationResult.OriginalProjectState?.HasExistingDAL ?? false,
+						has_existing_bal = validationResult.OriginalProjectState?.HasExistingBAL ?? false,
+						extraction_strategy = validationResult.OriginalProjectState?.Architecture?.ExtractionStrategy.ToString()
+					},
+					migrated_projects = new
+					{
+						dal_project_path = project?.DalProjectPath,
+						bal_project_path = project?.BalProjectPath,
+						total_migrated_files = validationResult.MigratedProjectState?.TotalMigratedFiles ?? 0,
+						dal_files_count = validationResult.MigratedProjectState?.DalFilesCount ?? 0,
+						bal_files_count = validationResult.MigratedProjectState?.BalFilesCount ?? 0
+					},
+					database_status = new
+					{
+						is_connectable = validationResult.DatabaseValidation?.IsConnectable ?? false,
+						has_required_schema = validationResult.DatabaseValidation?.HasRequiredSchema ?? false
+					},
+					dependency_analysis = new
+					{
+						good_dependencies = validationResult.GoodDependencies,
+						good_dependencies_count = validationResult.GoodDependencies.Count
+					},
+					issues = validationResult.Issues,
+					warnings = validationResult.Warnings,
+					recommendations = GenerateHealthRecommendations(validationResult)
+				};
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, "Error validating project health");
+				return new
+				{
+					success = false,
+					health_status = "validation_error",
+					error = ex.Message
+				};
+			}
+		}
+
+		private List<string> GenerateHealthRecommendations(MigrationValidationResult validation)
+		{
+			var recommendations = new List<string>();
+
+			if (validation.Issues.Any())
+			{
+				recommendations.Add("🔴 Fix critical issues before continuing migration");
+			}
+
+			if (validation.Warnings.Any())
+			{
+				recommendations.Add("🟡 Review warnings for potential improvements");
+			}
+
+			if (validation.OriginalProjectState?.Architecture?.ExtractionStrategy == ExtractionStrategy.ReuseAndEnhance)
+			{
+				recommendations.Add("✅ Good existing architecture detected - focus on modernization");
+			}
+			else if (validation.OriginalProjectState?.Architecture?.ExtractionStrategy == ExtractionStrategy.ModernizeDataSets)
+			{
+				recommendations.Add("🔄 DataSets detected - prioritize modernizing to async patterns");
+			}
+
+			if (validation.GoodDependencies.Any())
+			{
+				recommendations.Add($"✅ {validation.GoodDependencies.Count} dependencies properly reference migrated files");
+			}
+
+			if (!validation.DatabaseValidation?.IsConnectable == true)
+			{
+				recommendations.Add("🔗 Test database connectivity before continuing");
+			}
+
+			if (recommendations.Count == 0)
+			{
+				recommendations.Add("✅ Project health is good - ready for migration");
+			}
+
+			return recommendations;
 		}
 	}
 }
