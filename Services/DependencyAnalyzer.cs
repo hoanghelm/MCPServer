@@ -172,7 +172,9 @@ namespace CSharpLegacyMigrationMCP.Services
 				Properties = ExtractPropertyNames(file.SourceCode),
 				DatabaseTables = ExtractDatabaseTableReferences(file.SourceCode),
 				BusinessEntities = ExtractBusinessEntityReferences(file.SourceCode),
-				CustomTypes = ExtractCustomTypeReferences(file.SourceCode)
+				CustomTypes = ExtractCustomTypeReferences(file.SourceCode),
+				Interfaces = ExtractInterfaceReferences(file.SourceCode),
+				ProjectReferences = ExtractProjectReferences(file.SourceCode)
 			};
 
 			return dependencies;
@@ -225,12 +227,62 @@ namespace CSharpLegacyMigrationMCP.Services
 				return true;
 			}
 
-			// 6. Namespace overlap
-			var currentNamespaces = currentDependencies.Namespaces;
+			// 6. Interface implementations (IUserService -> UserService)
+			var currentEntity = ExtractEntityName(currentFile.FileName);
+			var relatedEntity = ExtractEntityName(potentialRelated.FileName);
+			if (!string.IsNullOrEmpty(currentEntity) && !string.IsNullOrEmpty(relatedEntity))
+			{
+				if (currentFile.SourceCode.Contains($"I{relatedEntity}", StringComparison.OrdinalIgnoreCase) || 
+					potentialRelated.SourceCode.Contains($"I{currentEntity}", StringComparison.OrdinalIgnoreCase))
+				{
+					return true;
+				}
+			}
+
+			// 7. Interface references
+			foreach (var interfaceRef in currentDependencies.Interfaces)
+			{
+				if (potentialRelated.SourceCode.Contains(interfaceRef, StringComparison.OrdinalIgnoreCase) ||
+					potentialRelated.FileName.Contains(interfaceRef.Replace("I", ""), StringComparison.OrdinalIgnoreCase))
+				{
+					return true;
+				}
+			}
+
+			// 8. Project namespace references
 			var relatedDependencies = AnalyzeDependencies(potentialRelated);
+			foreach (var projectRef in currentDependencies.ProjectReferences)
+			{
+				if (relatedDependencies.ProjectReferences.Any(r => r.Contains(projectRef, StringComparison.OrdinalIgnoreCase)))
+				{
+					return true;
+				}
+			}
+
+			// 9. Namespace overlap
+			var currentNamespaces = currentDependencies.Namespaces;
 			if (currentNamespaces.Intersect(relatedDependencies.Namespaces, StringComparer.OrdinalIgnoreCase).Any())
 			{
 				return true;
+			}
+
+			// 10. DAL/BAL layer relationship (UserDAL <-> UserBAL)
+			if (!string.IsNullOrEmpty(currentEntity) && !string.IsNullOrEmpty(relatedEntity) &&
+				currentEntity.Equals(relatedEntity, StringComparison.OrdinalIgnoreCase))
+			{
+				var currentIsDAL = currentFile.FileName.Contains("DAL", StringComparison.OrdinalIgnoreCase) ||
+								  currentFile.FilePath.Contains("DataAccess", StringComparison.OrdinalIgnoreCase);
+				var relatedIsBAL = potentialRelated.FileName.Contains("BAL", StringComparison.OrdinalIgnoreCase) ||
+								  potentialRelated.FilePath.Contains("BusinessLogics", StringComparison.OrdinalIgnoreCase);
+				var currentIsBAL = currentFile.FileName.Contains("BAL", StringComparison.OrdinalIgnoreCase) ||
+								  currentFile.FilePath.Contains("BusinessLogics", StringComparison.OrdinalIgnoreCase);
+				var relatedIsDAL = potentialRelated.FileName.Contains("DAL", StringComparison.OrdinalIgnoreCase) ||
+								  potentialRelated.FilePath.Contains("DataAccess", StringComparison.OrdinalIgnoreCase);
+
+				if ((currentIsDAL && relatedIsBAL) || (currentIsBAL && relatedIsDAL))
+				{
+					return true;
+				}
 			}
 
 			return false;
@@ -395,6 +447,84 @@ namespace CSharpLegacyMigrationMCP.Services
 			}
 
 			return content;
+		}
+
+		public async Task<List<ProjectFile>> GetAllRelatedFilesAsync(ProjectFile currentFile, string projectId)
+		{
+			try
+			{
+				_logger.LogInformation($"Analyzing all dependencies (migrated + unmigrated) for file: {currentFile.FileName}");
+
+				// Get both migrated and unmigrated files
+				var migratedFiles = await _repository.GetProjectFilesAsync(projectId, "migrated");
+				var unmigratedFiles = await _repository.GetProjectFilesAsync(projectId, "pending");
+
+				var dependencies = AnalyzeDependencies(currentFile);
+				var relatedFiles = new List<ProjectFile>();
+
+				// Combine all files and prioritize migrated versions
+				var allFiles = migratedFiles.Concat(unmigratedFiles).ToList();
+
+				// Group by entity name and prioritize migrated files
+				var filesByEntity = allFiles
+					.GroupBy(f => ExtractEntityName(f.FileName))
+					.ToDictionary(g => g.Key, g => g.OrderBy(f => f.Status == "migrated" ? 0 : 1).ToList());
+
+				foreach (var fileGroup in filesByEntity.Values)
+				{
+					var primaryFile = fileGroup.First(); // Migrated version if available, otherwise unmigrated
+					
+					if (IsRelatedFile(currentFile, primaryFile, dependencies))
+					{
+						relatedFiles.Add(primaryFile);
+						_logger.LogInformation($"Found related file: {primaryFile.FileName} (Status: {primaryFile.Status})");
+					}
+				}
+
+				return SortByRelevance(currentFile, relatedFiles);
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, $"Error analyzing all dependencies for {currentFile.FileName}");
+				return new List<ProjectFile>();
+			}
+		}
+
+		public async Task<DependencyStatus> GetDependencyStatusAsync(ProjectFile currentFile, string projectId)
+		{
+			try
+			{
+				var allRelated = await GetAllRelatedFilesAsync(currentFile, projectId);
+				var dependencies = AnalyzeDependencies(currentFile);
+
+				var status = new DependencyStatus
+				{
+					MigratedDependencies = allRelated.Where(f => f.Status == "migrated").ToList(),
+					UnmigratedDependencies = allRelated.Where(f => f.Status != "migrated").ToList()
+				};
+
+				// Check for missing dependencies (referenced but not found)
+				foreach (var interfaceRef in dependencies.Interfaces)
+				{
+					bool found = allRelated.Any(f => 
+						f.SourceCode.Contains(interfaceRef, StringComparison.OrdinalIgnoreCase) ||
+						f.FileName.Contains(interfaceRef.Replace("I", ""), StringComparison.OrdinalIgnoreCase));
+					
+					if (!found)
+					{
+						status.MissingDependencies.Add(interfaceRef);
+					}
+				}
+
+				_logger.LogInformation($"Dependency status for {currentFile.FileName}: {status.MigratedDependencies.Count} migrated, {status.UnmigratedDependencies.Count} unmigrated, {status.MissingDependencies.Count} missing");
+
+				return status;
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, $"Error getting dependency status for {currentFile.FileName}");
+				return new DependencyStatus();
+			}
 		}
 
 		private List<string> ExtractClassNames(string sourceCode)
@@ -600,6 +730,71 @@ namespace CSharpLegacyMigrationMCP.Services
 
 			return builtInTypes.Contains(typeName, StringComparer.OrdinalIgnoreCase);
 		}
+
+		private List<string> ExtractInterfaceReferences(string sourceCode)
+		{
+			var interfaces = new List<string>();
+
+			// Interface implementations (class X : IY)
+			var implementsMatches = Regex.Matches(sourceCode, @"class\s+\w+\s*:\s*(I\w+)", RegexOptions.IgnoreCase);
+			foreach (Match match in implementsMatches)
+			{
+				if (match.Groups.Count > 1)
+				{
+					interfaces.Add(match.Groups[1].Value);
+				}
+			}
+
+			// Interface declarations
+			var declarationMatches = Regex.Matches(sourceCode, @"(?:public|internal|private)\s+interface\s+(I\w+)", RegexOptions.IgnoreCase);
+			foreach (Match match in declarationMatches)
+			{
+				if (match.Groups.Count > 1)
+				{
+					interfaces.Add(match.Groups[1].Value);
+				}
+			}
+
+			// Interface usage in method parameters and variables
+			var usageMatches = Regex.Matches(sourceCode, @"\b(I[A-Z]\w+)\b", RegexOptions.IgnoreCase);
+			foreach (Match match in usageMatches)
+			{
+				interfaces.Add(match.Groups[1].Value);
+			}
+
+			return interfaces.Distinct().ToList();
+		}
+
+		private List<string> ExtractProjectReferences(string sourceCode)
+		{
+			var references = new List<string>();
+
+			// Look for namespace references that might indicate cross-project dependencies
+			var namespacePatterns = new[]
+			{
+				@"using\s+([\w\.]+\.DAL[\w\.]*);",
+				@"using\s+([\w\.]+\.BAL[\w\.]*);",
+				@"using\s+([\w\.]+\.DataAccess[\w\.]*);",
+				@"using\s+([\w\.]+\.BusinessLogics[\w\.]*);",
+				@"using\s+([\w\.]+\.Services[\w\.]*);",
+				@"using\s+([\w\.]+\.Models[\w\.]*);",
+				@"using\s+([\w\.]+\.Utils[\w\.]*);",
+			};
+
+			foreach (var pattern in namespacePatterns)
+			{
+				var matches = Regex.Matches(sourceCode, pattern, RegexOptions.IgnoreCase);
+				foreach (Match match in matches)
+				{
+					if (match.Groups.Count > 1)
+					{
+						references.Add(match.Groups[1].Value);
+					}
+				}
+			}
+
+			return references.Distinct().ToList();
+		}
 	}
 
 	// Supporting classes
@@ -612,11 +807,22 @@ namespace CSharpLegacyMigrationMCP.Services
 		public List<string> DatabaseTables { get; set; } = new List<string>();
 		public List<string> BusinessEntities { get; set; } = new List<string>();
 		public List<string> CustomTypes { get; set; } = new List<string>();
+		public List<string> Interfaces { get; set; } = new List<string>();
+		public List<string> ProjectReferences { get; set; } = new List<string>();
+	}
+
+	public class DependencyStatus
+	{
+		public List<ProjectFile> MigratedDependencies { get; set; } = new List<ProjectFile>();
+		public List<ProjectFile> UnmigratedDependencies { get; set; } = new List<ProjectFile>();
+		public List<string> MissingDependencies { get; set; } = new List<string>();
 	}
 
 	public interface IDependencyAnalyzer
 	{
 		Task<List<ProjectFile>> GetRelatedMigratedFilesAsync(ProjectFile currentFile, string projectId);
 		Task<List<string>> GetRelatedMigratedFileContentsAsync(ProjectFile currentFile, string projectId, MigrationProject project);
+		Task<List<ProjectFile>> GetAllRelatedFilesAsync(ProjectFile currentFile, string projectId);
+		Task<DependencyStatus> GetDependencyStatusAsync(ProjectFile currentFile, string projectId);
 	}
 }

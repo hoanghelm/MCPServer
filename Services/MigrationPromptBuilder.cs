@@ -79,6 +79,41 @@ namespace CSharpLegacyMigrationMCP.Services
 				}
 			}
 
+			// Get dependency status for better context
+			var dependencyStatus = await _dependencyAnalyzer.GetDependencyStatusAsync(file, projectId);
+			
+			prompt.AppendLine("📋 DEPENDENCY STATUS ANALYSIS:");
+			if (dependencyStatus.MigratedDependencies.Any())
+			{
+				prompt.AppendLine($"✅ MIGRATED DEPENDENCIES ({dependencyStatus.MigratedDependencies.Count}) - USE THESE:");
+				foreach (var migratedDep in dependencyStatus.MigratedDependencies.Take(10))
+				{
+					var entityName = ExtractEntityName(migratedDep.FileName);
+					var layer = migratedDep.FileName.Contains("DAL", StringComparison.OrdinalIgnoreCase) ? "DAL" : "BAL";
+					prompt.AppendLine($"  - {entityName} ({layer}) - Reference migrated version in {projectName}.{layer} namespace");
+				}
+			}
+			
+			if (dependencyStatus.UnmigratedDependencies.Any())
+			{
+				prompt.AppendLine($"⏳ UNMIGRATED DEPENDENCIES ({dependencyStatus.UnmigratedDependencies.Count}) - REFERENCE FUTURE NAMESPACE:");
+				foreach (var unmigratedDep in dependencyStatus.UnmigratedDependencies.Take(10))
+				{
+					var entityName = ExtractEntityName(unmigratedDep.FileName);
+					prompt.AppendLine($"  - {entityName} - Will be in {projectName}.DAL or {projectName}.BAL namespace when migrated");
+				}
+			}
+
+			if (dependencyStatus.MissingDependencies.Any())
+			{
+				prompt.AppendLine($"❓ MISSING DEPENDENCIES ({dependencyStatus.MissingDependencies.Count}) - CREATE IF NEEDED:");
+				foreach (var missingDep in dependencyStatus.MissingDependencies.Take(5))
+				{
+					prompt.AppendLine($"  - {missingDep} - Interface not found, may need to be created");
+				}
+			}
+			prompt.AppendLine();
+
 			// Get related migrated files for better context
 			var relatedFileContents = await _dependencyAnalyzer.GetRelatedMigratedFileContentsAsync(file, projectId, project);
 			if (relatedFileContents.Any())
@@ -215,6 +250,39 @@ namespace CSharpLegacyMigrationMCP.Services
 			prompt.AppendLine("FINAL INSTRUCTION: You have DIRECT FILE ACCESS. Write COMPLETE, PRODUCTION-READY files directly to the target project paths. Do not provide code in your response - instead, CREATE THE ACTUAL FILES. After creating files, provide a summary of what was created and where.");
 
 			return prompt.ToString();
+		}
+
+		private string ExtractEntityName(string fileName)
+		{
+			// Remove common prefixes/suffixes to get entity name
+			var name = Path.GetFileNameWithoutExtension(fileName);
+
+			// Remove common patterns
+			var patterns = new[]
+			{
+				@"(.+)Repository$",
+				@"(.+)Service$",
+				@"(.+)Manager$",
+				@"(.+)Controller$",
+				@"(.+)Dal$",
+				@"(.+)DAL$",
+				@"(.+)Bal$",
+				@"(.+)BAL$",
+				@"(.+)Business$",
+				@"(.+)Data$",
+				@"(.+)Logic$"
+			};
+
+			foreach (var pattern in patterns)
+			{
+				var match = System.Text.RegularExpressions.Regex.Match(name, pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+				if (match.Success && match.Groups.Count > 1)
+				{
+					return match.Groups[1].Value;
+				}
+			}
+
+			return name;
 		}
 
 		private ProjectStructureInfo GetProjectStructureInfo(MigrationProject project)
