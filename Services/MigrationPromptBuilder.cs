@@ -111,12 +111,23 @@ namespace CSharpLegacyMigrationMCP.Services
 				prompt.AppendLine();
 			}
 
+			prompt.AppendLine("SEPARATE DAL AND BAL PROJECT STRATEGY:");
+			prompt.AppendLine("This migration creates TWO SEPARATE projects:");
+			prompt.AppendLine($"1. **{projectName}.DAL** - Data Access Layer Project");
+			prompt.AppendLine("   - Contains: DataAccess/, Models/, Interfaces/ folders");
+			prompt.AppendLine("   - Handles: Database operations, entity models, repository interfaces and implementations");
+			prompt.AppendLine($"2. **{projectName}.BAL** - Business Access Layer Project");
+			prompt.AppendLine("   - Contains: BusinessLogics/, Utils/, Interfaces/ folders");
+			prompt.AppendLine("   - Handles: Business logic, services, DTOs, validation, utilities");
+			prompt.AppendLine("   - References: DAL project for data access");
+			prompt.AppendLine();
+
 			prompt.AppendLine("DIRECT FILE WRITING INSTRUCTIONS:");
-			prompt.AppendLine("1. **WRITE FILES DIRECTLY**: Use the provided paths to write complete files immediately");
-			prompt.AppendLine("2. **CREATE DIRECTORY STRUCTURE**: Create necessary folders (Interfaces, Repositories, Services, Models, etc.)");
-			prompt.AppendLine("3. **REFERENCE EXISTING FILES**: When creating new files, check existing files for consistent naming and dependencies");
-			prompt.AppendLine("4. **UPDATE RELATED FILES**: If you need to update existing interfaces or add new dependencies, do so directly");
-			prompt.AppendLine("5. **MAINTAIN CONSISTENCY**: Follow existing patterns in the project for naming and structure");
+			prompt.AppendLine("1. **WRITE FILES TO SEPARATE PROJECTS**: Write DAL files to DAL project, BAL files to BAL project");
+			prompt.AppendLine("2. **CREATE APPROPRIATE FOLDER STRUCTURE**: Use DataAccess/, BusinessLogics/, Interfaces/, Models/, Utils/");
+			prompt.AppendLine("3. **MAINTAIN PROJECT SEPARATION**: DAL handles data, BAL handles business logic");
+			prompt.AppendLine("4. **REFERENCE EXISTING FILES**: Check existing files for consistent naming and dependencies");
+			prompt.AppendLine("5. **UPDATE RELATED FILES**: If needed, update existing interfaces or add new dependencies");
 			prompt.AppendLine();
 
 			prompt.AppendLine("MIGRATION REQUIREMENTS - WRITE COMPLETE FILES:");
@@ -127,12 +138,12 @@ namespace CSharpLegacyMigrationMCP.Services
 			prompt.AppendLine("5. **DEPENDENCY INJECTION**: Complete constructor injection with proper validation");
 			prompt.AppendLine("6. **ASYNC/AWAIT PATTERNS**: All database operations must be async with proper cancellation token support");
 			prompt.AppendLine("7. **SOLID PRINCIPLES**: Follow all SOLID principles with proper abstractions");
-			prompt.AppendLine("8. **MODERN C# FEATURES**: Use C# 9.0+ features (records, pattern matching, null-coalescing, etc.)");
-			prompt.AppendLine("9. **POSTGRESQL SPECIFIC**: Use Npgsql with proper PostgreSQL syntax and features");
+			prompt.AppendLine("8. **C# FEATURES**: Use C# features compatible with netcoreapp2.0");
+			prompt.AppendLine("9. **POSTGRESQL SPECIFIC**: Use Npgsql 3.2.7 with proper PostgreSQL syntax and features");
 			prompt.AppendLine("10. **PRODUCTION READY**: Include logging, validation, configuration, and proper resource disposal");
 			prompt.AppendLine();
 
-			prompt.AppendLine("POSTGRESQL INTEGRATION REQUIREMENTS:");
+			prompt.AppendLine("POSTGRESQL INTEGRATION REQUIREMENTS (Npgsql 3.2.7):");
 			prompt.AppendLine("- Use NpgsqlConnection for all database connections");
 			prompt.AppendLine("- Use NpgsqlCommand with proper parameter binding");
 			prompt.AppendLine("- Include connection string configuration (IConfiguration)");
@@ -140,6 +151,7 @@ namespace CSharpLegacyMigrationMCP.Services
 			prompt.AppendLine("- Implement proper connection pooling and disposal");
 			prompt.AppendLine("- Use PostgreSQL-specific SQL syntax (RETURNING, LIMIT, etc.)");
 			prompt.AppendLine("- Include proper type mapping for PostgreSQL data types");
+			prompt.AppendLine("- Compatible with netcoreapp2.0 framework");
 			prompt.AppendLine();
 
 			// Add specific instructions based on file type
@@ -160,14 +172,18 @@ namespace CSharpLegacyMigrationMCP.Services
 			prompt.AppendLine("5. Update any related files if necessary");
 			prompt.AppendLine();
 
-			prompt.AppendLine("EXAMPLE FILE PATHS TO CREATE:");
+			prompt.AppendLine("FILE ORGANIZATION BY PROJECT:");
 			if (projectInfo != null)
 			{
-				prompt.AppendLine($"- Interfaces: {projectInfo.DalProjectPath}/Interfaces/I{{EntityName}}Repository.cs");
-				prompt.AppendLine($"- Repositories: {projectInfo.DalProjectPath}/Repositories/{{EntityName}}Repository.cs");
-				prompt.AppendLine($"- Services: {projectInfo.BalProjectPath}/Services/{{EntityName}}Service.cs");
-				prompt.AppendLine($"- Business Interfaces: {projectInfo.BalProjectPath}/Interfaces/I{{EntityName}}Service.cs");
-				prompt.AppendLine($"- Models/DTOs: {projectInfo.BalProjectPath}/Models/{{EntityName}}Dto.cs");
+				prompt.AppendLine($"**DAL PROJECT ({projectName}.DAL):**");
+				prompt.AppendLine($"- Data Interfaces: {projectInfo.DalProjectPath}/Interfaces/I{{EntityName}}Interfaces.cs");
+				prompt.AppendLine($"- Data Implementations: {projectInfo.DalProjectPath}/DataAccess/{{EntityName}}DAL.cs");
+				prompt.AppendLine($"- Entity Models: {projectInfo.DalProjectPath}/Models/{{EntityName}}.cs");
+				prompt.AppendLine();
+				prompt.AppendLine($"**BAL PROJECT ({projectName}.BAL):**");
+				prompt.AppendLine($"- Business Interfaces: {projectInfo.BalProjectPath}/Interfaces/I{{EntityName}}Interfaces.cs");
+				prompt.AppendLine($"- Business Logic: {projectInfo.BalProjectPath}/BusinessLogics/{{EntityName}}BAL.cs");
+				prompt.AppendLine($"- Utilities: {projectInfo.BalProjectPath}/Utils/{{UtilityName}}.cs");
 			}
 			prompt.AppendLine();
 
@@ -245,36 +261,47 @@ namespace CSharpLegacyMigrationMCP.Services
 			{
 				case "WebForm":
 				case "CodeBehind":
-					prompt.AppendLine("WEBFORM COMPLETE MIGRATION INSTRUCTIONS:");
-					prompt.AppendLine("- Extract EVERY database operation from Page_Load and ALL event handlers");
-					prompt.AppendLine("- Create service interfaces and implementations for ALL page operations");
-					prompt.AppendLine("- Write repository interfaces and implementations for all data access");
-					prompt.AppendLine("- Create DTOs for all data transfer operations");
-					prompt.AppendLine("- Generate complete validation logic");
-					prompt.AppendLine("- Keep only presentation logic in the original file (provide refactored code-behind)");
-					prompt.AppendLine("- Write all files directly to the appropriate DAL/BAL folders");
+					prompt.AppendLine("WEBFORM COMPLETE MIGRATION TO SEPARATE DAL/BAL:");
+					prompt.AppendLine("**DAL PROJECT FILES TO CREATE:**");
+					prompt.AppendLine("- Data interfaces in DAL/Interfaces/I{Entity}Interfaces.cs");
+					prompt.AppendLine("- Data access implementations in DAL/DataAccess/{Entity}DAL.cs");
+					prompt.AppendLine("- Entity models in DAL/Models/{Entity}.cs");
+					prompt.AppendLine("**BAL PROJECT FILES TO CREATE:**");
+					prompt.AppendLine("- Business interfaces in BAL/Interfaces/I{Entity}Interfaces.cs");
+					prompt.AppendLine("- Business logic in BAL/BusinessLogics/{Entity}BAL.cs");
+					prompt.AppendLine("- Utilities in BAL/Utils/ folder if needed");
+					prompt.AppendLine("**EXTRACTION STRATEGY:**");
+					prompt.AppendLine("- Extract ALL database operations from Page_Load and event handlers → DAL");
+					prompt.AppendLine("- Extract ALL business logic and validation → BAL");
+					prompt.AppendLine("- Keep only presentation logic in original file");
 					prompt.AppendLine();
 					break;
 
 				case "DataAccess":
-					prompt.AppendLine("DATA ACCESS COMPLETE MIGRATION INSTRUCTIONS:");
-					prompt.AppendLine("- Create repository interfaces with ALL async methods");
-					prompt.AppendLine("- Write complete repository implementations with full SQL queries");
+					prompt.AppendLine("DATA ACCESS MIGRATION TO DAL PROJECT:");
+					prompt.AppendLine("**DAL PROJECT STRUCTURE:**");
+					prompt.AppendLine("- Interfaces: DAL/Interfaces/I{Entity}Interfaces.cs");
+					prompt.AppendLine("- Implementations: DAL/DataAccess/{Entity}DAL.cs");
+					prompt.AppendLine("- Models: DAL/Models/{Entity}.cs");
+					prompt.AppendLine("**IMPLEMENTATION REQUIREMENTS:**");
 					prompt.AppendLine("- Use NpgsqlConnection with complete connection handling");
-					prompt.AppendLine("- Implement using Dapper OR EF Core with full configuration");
-					prompt.AppendLine("- Write files directly to DAL project Interfaces/ and Repositories/ folders");
+					prompt.AppendLine("- Direct Npgsql implementation (NO Dapper)");
 					prompt.AppendLine("- Include complete transaction handling");
-					prompt.AppendLine("- Create entity models if needed");
+					prompt.AppendLine("- All methods must be async with proper error handling");
 					prompt.AppendLine();
 					break;
 
 				case "BusinessLogic":
-					prompt.AppendLine("BUSINESS LOGIC COMPLETE MIGRATION INSTRUCTIONS:");
-					prompt.AppendLine("- Create service interfaces with ALL business methods");
-					prompt.AppendLine("- Write complete service implementations with full business logic");
-					prompt.AppendLine("- Write files directly to BAL project Interfaces/ and Services/ folders");
+					prompt.AppendLine("BUSINESS LOGIC MIGRATION TO BAL PROJECT:");
+					prompt.AppendLine("**BAL PROJECT STRUCTURE:**");
+					prompt.AppendLine("- Interfaces: BAL/Interfaces/I{Entity}Interfaces.cs");
+					prompt.AppendLine("- Implementations: BAL/BusinessLogics/{Entity}BAL.cs");
+					prompt.AppendLine("- Utilities: BAL/Utils/{Utility}.cs");
+					prompt.AppendLine("**IMPLEMENTATION REQUIREMENTS:**");
+					prompt.AppendLine("- Create business interfaces with ALL business methods");
+					prompt.AppendLine("- Write complete business logic implementations");
 					prompt.AppendLine("- Include comprehensive validation and business rules");
-					prompt.AppendLine("- Create DTOs and models in Models/ folder");
+					prompt.AppendLine("- Reference DAL project for data access");
 					prompt.AppendLine("- Implement proper exception handling and logging");
 					prompt.AppendLine();
 					break;
