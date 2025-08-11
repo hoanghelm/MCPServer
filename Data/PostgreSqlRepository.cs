@@ -20,285 +20,154 @@ namespace CSharpLegacyMigrationMCP.Data
 		{
 			_logger = logger;
 			_connectionString = options.Value.ConnectionString;
-			InitializeDatabaseAsync().Wait();
+			MigrateAsync().Wait();
 		}
 
-		public async Task<string> SaveAnalysisResultAsync(AnalysisResult result)
+		// Project operations
+		public async Task<string> SaveWorkspaceAnalysisAsync(WorkspaceAnalysis analysis)
 		{
 			try
 			{
 				using var connection = new NpgsqlConnection(_connectionString);
 				await connection.OpenAsync();
 
+				// Save analysis
 				var analysisQuery = @"
-                    INSERT INTO analysis_results (id, directory_path, analyzed_at, total_files, total_classes, total_methods, complexity_score, dependencies)
-                    VALUES (@Id, @DirectoryPath, @AnalyzedAt, @TotalFiles, @TotalClasses, @TotalMethods, @ComplexityScore::double precision, @Dependencies::jsonb)
-                    ON CONFLICT (id) DO UPDATE SET
-                        directory_path = @DirectoryPath,
+                    INSERT INTO workspace_analysis (project_id, project_name, workspace_path, analyzed_at, total_files, 
+                                                   files_by_type, files_by_complexity)
+                    VALUES (@ProjectId, @ProjectName, @WorkspacePath, @AnalyzedAt, @TotalFiles, 
+                            @FilesByType::jsonb, @FilesByComplexity::jsonb)
+                    ON CONFLICT (project_id) DO UPDATE SET
+                        project_name = @ProjectName,
+                        workspace_path = @WorkspacePath,
                         analyzed_at = @AnalyzedAt,
                         total_files = @TotalFiles,
-                        total_classes = @TotalClasses,
-                        total_methods = @TotalMethods,
-                        complexity_score = @ComplexityScore::double precision,
-                        dependencies = @Dependencies::jsonb";
+                        files_by_type = @FilesByType::jsonb,
+                        files_by_complexity = @FilesByComplexity::jsonb";
 
 				await connection.ExecuteAsync(analysisQuery, new
 				{
-					result.Id,
-					result.DirectoryPath,
-					result.AnalyzedAt,
-					result.TotalFiles,
-					result.TotalClasses,
-					result.TotalMethods,
-					ComplexityScore = result.ComplexityScore,
-					Dependencies = JsonConvert.SerializeObject(result.Dependencies)
+					analysis.ProjectId,
+					analysis.ProjectName,
+					analysis.WorkspacePath,
+					analysis.AnalyzedAt,
+					analysis.TotalFiles,
+					FilesByType = JsonConvert.SerializeObject(analysis.FilesByType),
+					FilesByComplexity = JsonConvert.SerializeObject(analysis.FilesByComplexity)
 				});
 
-				foreach (var structure in result.CodeStructures)
+				// Save all files
+				var allFiles = analysis.CsFiles
+					.Concat(analysis.AspxFiles)
+					.Concat(analysis.AscxFiles);
+
+				foreach (var file in allFiles)
 				{
-					await SaveCodeStructureInternalAsync(connection, structure);
+					await SaveProjectFileAsync(connection, file);
 				}
 
-				_logger.LogInformation($"Saved analysis result {result.Id} with {result.CodeStructures.Count} code structures");
-				return result.Id;
+				_logger.LogInformation($"Saved workspace analysis for {analysis.ProjectName}");
+				return analysis.ProjectId;
 			}
 			catch (Exception ex)
 			{
-				_logger.LogError(ex, $"Error saving analysis result {result.Id}");
+				_logger.LogError(ex, "Error saving workspace analysis");
 				throw;
 			}
 		}
 
-		public async Task<AnalysisResult> GetAnalysisResultAsync(string analysisId)
+		public async Task<WorkspaceAnalysis> GetWorkspaceAnalysisAsync(string projectId)
 		{
 			try
 			{
 				using var connection = new NpgsqlConnection(_connectionString);
 				await connection.OpenAsync();
 
-				var query = "SELECT * FROM analysis_results WHERE id = @AnalysisId";
-				var row = await connection.QueryFirstOrDefaultAsync<dynamic>(query, new { AnalysisId = analysisId });
+				var query = "SELECT * FROM workspace_analysis WHERE project_id = @ProjectId";
+				var row = await connection.QueryFirstOrDefaultAsync<dynamic>(query, new { ProjectId = projectId });
 
 				if (row == null)
 					return null;
 
-				var result = new AnalysisResult
+				var analysis = new WorkspaceAnalysis
 				{
-					Id = row.id,
-					DirectoryPath = row.directory_path,
+					ProjectId = row.project_id,
+					ProjectName = row.project_name,
+					WorkspacePath = row.workspace_path,
 					AnalyzedAt = row.analyzed_at,
 					TotalFiles = row.total_files,
-					TotalClasses = row.total_classes,
-					TotalMethods = row.total_methods,
-					ComplexityScore = SafeConvertToDouble(row.complexity_score),
-					Dependencies = JsonConvert.DeserializeObject<List<string>>(row.dependencies ?? "[]")
+					FilesByType = JsonConvert.DeserializeObject<Dictionary<string, int>>(row.files_by_type ?? "{}"),
+					FilesByComplexity = JsonConvert.DeserializeObject<Dictionary<string, int>>(row.files_by_complexity ?? "{}")
 				};
 
-				result.CodeStructures = await GetCodeStructuresAsync(analysisId);
-				return result;
-			}
-			catch (Exception ex)
-			{
-				_logger.LogError(ex, $"Error getting analysis result {analysisId}");
-				throw;
-			}
-		}
-
-		public async Task<List<CodeStructure>> GetCodeStructuresAsync(string analysisId)
-		{
-			try
-			{
-				using var connection = new NpgsqlConnection(_connectionString);
-				await connection.OpenAsync();
-
-				var structuresQuery = "SELECT * FROM code_structures WHERE analysis_id = @AnalysisId ORDER BY class_name";
-				var structures = await connection.QueryAsync<dynamic>(structuresQuery, new { AnalysisId = analysisId });
-
-				var result = new List<CodeStructure>();
-
-				foreach (var row in structures)
+				// Load files
+				var files = await GetProjectFilesAsync(projectId);
+				foreach (var file in files)
 				{
-					var structure = new CodeStructure
+					if (file.FilePath.EndsWith(".cs"))
+						analysis.CsFiles.Add(file);
+					else if (file.FilePath.EndsWith(".aspx"))
+						analysis.AspxFiles.Add(file);
+					else if (file.FilePath.EndsWith(".ascx"))
+						analysis.AscxFiles.Add(file);
+
+					// Categorize by type
+					switch (file.FileType)
 					{
-						Id = row.id,
-						AnalysisId = row.analysis_id,
-						FilePath = row.file_path,
-						ClassName = row.class_name,
-						Namespace = row.namespace_name,
-						Type = Enum.Parse<CodeStructureType>(row.structure_type),
-						SourceCode = row.source_code,
-						IsMigrated = row.is_migrated,
-						MigratedAt = row.migrated_at,
-						MigratedCode = row.migrated_code,
-						ComplexityScore = SafeConvertToDouble(row.complexity_score),
-						Dependencies = JsonConvert.DeserializeObject<List<string>>(row.dependencies ?? "[]"),
-						DatabaseTables = JsonConvert.DeserializeObject<List<string>>(row.database_tables ?? "[]")
-					};
-
-					var methodsQuery = "SELECT * FROM method_structures WHERE code_structure_id = @StructureId ORDER BY name";
-					var methods = await connection.QueryAsync<dynamic>(methodsQuery, new { StructureId = structure.Id });
-
-					foreach (var methodRow in methods)
-					{
-						var method = new MethodStructure
-						{
-							Id = methodRow.id,
-							Name = methodRow.name,
-							ReturnType = methodRow.return_type,
-							LinesOfCode = methodRow.lines_of_code,
-							ComplexityScore = SafeConvertToDouble(methodRow.complexity_score),
-							SourceCode = methodRow.source_code,
-							HasDatabaseAccess = methodRow.has_database_access,
-							IsMigrated = methodRow.is_migrated,
-							MigratedCode = methodRow.migrated_code,
-							Dependencies = JsonConvert.DeserializeObject<List<string>>(methodRow.dependencies ?? "[]"),
-							DatabaseOperations = JsonConvert.DeserializeObject<List<string>>(methodRow.database_operations ?? "[]"),
-							Parameters = JsonConvert.DeserializeObject<List<ParameterStructure>>(methodRow.parameters ?? "[]")
-						};
-
-						structure.Methods.Add(method);
+						case "WebForm":
+						case "CodeBehind":
+							analysis.WebForms.Add(file);
+							break;
+						case "DataAccess":
+							analysis.DataAccessFiles.Add(file);
+							break;
+						case "BusinessLogic":
+							analysis.BusinessLogicFiles.Add(file);
+							break;
 					}
-
-					var propertiesQuery = "SELECT * FROM property_structures WHERE code_structure_id = @StructureId ORDER BY name";
-					var properties = await connection.QueryAsync<dynamic>(propertiesQuery, new { StructureId = structure.Id });
-
-					foreach (var propRow in properties)
-					{
-						var property = new PropertyStructure
-						{
-							Name = propRow.name,
-							Type = propRow.property_type,
-							HasGetter = propRow.has_getter,
-							HasSetter = propRow.has_setter,
-							IsPublic = propRow.is_public
-						};
-
-						structure.Properties.Add(property);
-					}
-
-					result.Add(structure);
 				}
 
-				return result;
+				return analysis;
 			}
 			catch (Exception ex)
 			{
-				_logger.LogError(ex, $"Error getting code structures for analysis {analysisId}");
+				_logger.LogError(ex, $"Error getting workspace analysis {projectId}");
 				throw;
 			}
 		}
 
-		public async Task UpdateCodeStructureAsync(CodeStructure structure)
+		public async Task<MigrationProject> GetMigrationProjectAsync(string projectId)
 		{
 			try
 			{
 				using var connection = new NpgsqlConnection(_connectionString);
 				await connection.OpenAsync();
 
-				var query = @"
-                    UPDATE code_structures SET
-                        is_migrated = @IsMigrated,
-                        migrated_at = @MigratedAt,
-                        migrated_code = @MigratedCode
-                    WHERE id = @Id";
-
-				await connection.ExecuteAsync(query, new
-				{
-					structure.IsMigrated,
-					structure.MigratedAt,
-					structure.MigratedCode,
-					structure.Id
-				});
-
-				foreach (var method in structure.Methods)
-				{
-					var methodQuery = @"
-                        UPDATE method_structures SET
-                            is_migrated = @IsMigrated,
-                            migrated_code = @MigratedCode
-                        WHERE id = @Id";
-
-					await connection.ExecuteAsync(methodQuery, new
-					{
-						method.IsMigrated,
-						method.MigratedCode,
-						method.Id
-					});
-				}
-			}
-			catch (Exception ex)
-			{
-				_logger.LogError(ex, $"Error updating code structure {structure.Id}");
-				throw;
-			}
-		}
-
-		public async Task SaveMigrationStructureAsync(MigrationStructure structure)
-		{
-			try
-			{
-				using var connection = new NpgsqlConnection(_connectionString);
-				await connection.OpenAsync();
-
-				var query = @"
-                    INSERT INTO migration_structures (analysis_id, business_logic_interfaces, data_access_interfaces, models, suggested_projects, created_at)
-                    VALUES (@AnalysisId, @BusinessLogicInterfaces::jsonb, @DataAccessInterfaces::jsonb, @Models::jsonb, @SuggestedProjects::jsonb, @CreatedAt)
-                    ON CONFLICT (analysis_id) DO UPDATE SET
-                        business_logic_interfaces = @BusinessLogicInterfaces::jsonb,
-                        data_access_interfaces = @DataAccessInterfaces::jsonb,
-                        models = @Models::jsonb,
-                        suggested_projects = @SuggestedProjects::jsonb,
-                        updated_at = @CreatedAt";
-
-				await connection.ExecuteAsync(query, new
-				{
-					structure.AnalysisId,
-					BusinessLogicInterfaces = JsonConvert.SerializeObject(structure.BusinessLogicInterfaces),
-					DataAccessInterfaces = JsonConvert.SerializeObject(structure.DataAccessInterfaces),
-					Models = JsonConvert.SerializeObject(structure.Models),
-					SuggestedProjects = JsonConvert.SerializeObject(structure.SuggestedProjects),
-					CreatedAt = DateTime.UtcNow
-				});
-
-				_logger.LogInformation($"Saved migration structure for analysis {structure.AnalysisId}");
-			}
-			catch (Exception ex)
-			{
-				_logger.LogError(ex, $"Error saving migration structure for analysis {structure.AnalysisId}");
-				throw;
-			}
-		}
-
-		public async Task<MigrationStructure> GetMigrationStructureAsync(string analysisId)
-		{
-			try
-			{
-				using var connection = new NpgsqlConnection(_connectionString);
-				await connection.OpenAsync();
-
-				var query = "SELECT * FROM migration_structures WHERE analysis_id = @AnalysisId";
-				var row = await connection.QueryFirstOrDefaultAsync<dynamic>(query, new { AnalysisId = analysisId });
+				var query = "SELECT * FROM migration_projects WHERE project_id = @ProjectId";
+				var row = await connection.QueryFirstOrDefaultAsync<dynamic>(query, new { ProjectId = projectId });
 
 				if (row == null)
 					return null;
 
-				return new MigrationStructure
+				return new MigrationProject
 				{
-					AnalysisId = row.analysis_id,
-					BusinessLogicInterfaces = JsonConvert.DeserializeObject<List<InterfaceStructure>>(row.business_logic_interfaces ?? "[]"),
-					DataAccessInterfaces = JsonConvert.DeserializeObject<List<InterfaceStructure>>(row.data_access_interfaces ?? "[]"),
-					Models = JsonConvert.DeserializeObject<List<ModelStructure>>(row.models ?? "[]"),
-					SuggestedProjects = JsonConvert.DeserializeObject<List<string>>(row.suggested_projects ?? "[]")
+					ProjectId = row.project_id,
+					ProjectName = row.project_name,
+					WorkspacePath = row.workspace_path,
+					DalProjectPath = row.dal_project_path,
+					BalProjectPath = row.bal_project_path,
+					CreatedAt = row.created_at,
+					Status = Enum.Parse<ProjectStatus>(row.status)
 				};
 			}
 			catch (Exception ex)
 			{
-				_logger.LogError(ex, $"Error getting migration structure for analysis {analysisId}");
+				_logger.LogError(ex, $"Error getting migration project {projectId}");
 				throw;
 			}
 		}
 
-		public async Task SaveCodeChunkAsync(CodeChunk chunk)
+		public async Task SaveMigrationProjectAsync(MigrationProject project)
 		{
 			try
 			{
@@ -306,113 +175,307 @@ namespace CSharpLegacyMigrationMCP.Data
 				await connection.OpenAsync();
 
 				var query = @"
-                    INSERT INTO code_chunks (id, analysis_id, class_ids, combined_code, estimated_tokens, is_processed, migrated_code, errors, created_at)
-                    VALUES (@Id, @AnalysisId, @ClassIds::jsonb, @CombinedCode, @EstimatedTokens, @IsProcessed, @MigratedCode, @Errors::jsonb, @CreatedAt)
-                    ON CONFLICT (id) DO UPDATE SET
-                        combined_code = @CombinedCode,
-                        estimated_tokens = @EstimatedTokens,
-                        is_processed = @IsProcessed,
-                        migrated_code = @MigratedCode,
-                        errors = @Errors::jsonb,
-                        updated_at = @CreatedAt";
+                    INSERT INTO migration_projects (project_id, project_name, workspace_path, dal_project_path, 
+                                                   bal_project_path, created_at, status)
+                    VALUES (@ProjectId, @ProjectName, @WorkspacePath, @DalProjectPath, 
+                            @BalProjectPath, @CreatedAt, @Status)
+                    ON CONFLICT (project_id) DO UPDATE SET
+                        project_name = @ProjectName,
+                        workspace_path = @WorkspacePath,
+                        dal_project_path = @DalProjectPath,
+                        bal_project_path = @BalProjectPath,
+                        status = @Status";
 
 				await connection.ExecuteAsync(query, new
 				{
-					chunk.Id,
-					chunk.AnalysisId,
-					ClassIds = JsonConvert.SerializeObject(chunk.ClassIds),
-					chunk.CombinedCode,
-					chunk.EstimatedTokens,
-					chunk.IsProcessed,
-					chunk.MigratedCode,
-					Errors = JsonConvert.SerializeObject(chunk.Errors),
-					CreatedAt = DateTime.UtcNow
+					project.ProjectId,
+					project.ProjectName,
+					project.WorkspacePath,
+					project.DalProjectPath,
+					project.BalProjectPath,
+					project.CreatedAt,
+					Status = project.Status.ToString()
 				});
 			}
 			catch (Exception ex)
 			{
-				_logger.LogError(ex, $"Error saving code chunk {chunk.Id}");
+				_logger.LogError(ex, "Error saving migration project");
 				throw;
 			}
 		}
 
-		public async Task<List<CodeChunk>> GetCodeChunksAsync(string analysisId)
+		// File operations
+		public async Task<List<ProjectFile>> GetProjectFilesAsync(string projectId, string statusFilter = "all")
 		{
 			try
 			{
 				using var connection = new NpgsqlConnection(_connectionString);
 				await connection.OpenAsync();
 
-				var query = "SELECT * FROM code_chunks WHERE analysis_id = @AnalysisId ORDER BY created_at";
-				var rows = await connection.QueryAsync<dynamic>(query, new { AnalysisId = analysisId });
+				var query = "SELECT * FROM project_files WHERE project_id = @ProjectId";
 
-				var result = new List<CodeChunk>();
-
-				foreach (var row in rows)
+				if (statusFilter != "all")
 				{
-					var chunk = new CodeChunk
-					{
-						Id = row.id,
-						AnalysisId = row.analysis_id,
-						ClassIds = JsonConvert.DeserializeObject<List<string>>(row.class_ids ?? "[]"),
-						CombinedCode = row.combined_code,
-						EstimatedTokens = row.estimated_tokens,
-						IsProcessed = row.is_processed,
-						MigratedCode = row.migrated_code,
-						Errors = JsonConvert.DeserializeObject<List<string>>(row.errors ?? "[]")
-					};
-
-					result.Add(chunk);
+					query += " AND migration_status = @Status";
 				}
 
-				return result;
+				query += " ORDER BY file_path";
+
+				var parameters = new DynamicParameters();
+				parameters.Add("ProjectId", projectId);
+				if (statusFilter != "all")
+				{
+					var status = statusFilter switch
+					{
+						"migrated" => MigrationStatus.Completed.ToString(),
+						"pending" => MigrationStatus.Pending.ToString(),
+						"failed" => MigrationStatus.Failed.ToString(),
+						_ => statusFilter
+					};
+					parameters.Add("Status", status);
+				}
+
+				var rows = await connection.QueryAsync<dynamic>(query, parameters);
+
+				var files = new List<ProjectFile>();
+				foreach (var row in rows)
+				{
+					var file = new ProjectFile
+					{
+						Id = row.id,
+						ProjectId = row.project_id,
+						FilePath = row.file_path,
+						FileName = row.file_name,
+						FileType = row.file_type,
+						SourceCode = row.source_code,
+						MigrationStatus = Enum.Parse<MigrationStatus>(row.migration_status),
+						MigratedAt = row.migrated_at,
+						DalOutputPath = row.dal_output_path,
+						BalOutputPath = row.bal_output_path,
+						ErrorMessage = row.error_message,
+						Complexity = row.complexity,
+						Classes = JsonConvert.DeserializeObject<List<string>>(row.classes ?? "[]"),
+						Dependencies = JsonConvert.DeserializeObject<List<string>>(row.dependencies ?? "[]"),
+						MigratedCode = JsonConvert.DeserializeObject<Dictionary<string, string>>(row.migrated_code ?? "{}")
+					};
+					files.Add(file);
+				}
+
+				return files;
 			}
 			catch (Exception ex)
 			{
-				_logger.LogError(ex, $"Error getting code chunks for analysis {analysisId}");
+				_logger.LogError(ex, $"Error getting project files for {projectId}");
 				throw;
 			}
 		}
 
-		public async Task UpdateCodeChunkAsync(CodeChunk chunk)
+		public async Task<ProjectFile> GetNextUnmigratedFileAsync(string projectId)
 		{
 			try
 			{
 				using var connection = new NpgsqlConnection(_connectionString);
 				await connection.OpenAsync();
 
-				var query = @"
-                    UPDATE code_chunks SET
-                        is_processed = @IsProcessed,
-                        migrated_code = @MigratedCode,
-                        errors = @Errors::jsonb,
-                        updated_at = @UpdatedAt
-                    WHERE id = @Id";
+				var query = @"SELECT * FROM project_files 
+                             WHERE project_id = @ProjectId 
+                             AND migration_status = @Status
+                             AND file_type NOT IN ('Unknown', 'Model')
+                             ORDER BY complexity DESC, file_path
+                             LIMIT 1";
 
-				await connection.ExecuteAsync(query, new
+				var row = await connection.QueryFirstOrDefaultAsync<dynamic>(query, new
 				{
-					chunk.IsProcessed,
-					chunk.MigratedCode,
-					Errors = JsonConvert.SerializeObject(chunk.Errors),
-					UpdatedAt = DateTime.UtcNow,
-					chunk.Id
+					ProjectId = projectId,
+					Status = MigrationStatus.Pending.ToString()
 				});
+
+				if (row == null)
+					return null;
+
+				return new ProjectFile
+				{
+					Id = row.id,
+					ProjectId = row.project_id,
+					FilePath = row.file_path,
+					FileName = row.file_name,
+					FileType = row.file_type,
+					SourceCode = row.source_code,
+					MigrationStatus = Enum.Parse<MigrationStatus>(row.migration_status),
+					Complexity = row.complexity,
+					Classes = JsonConvert.DeserializeObject<List<string>>(row.classes ?? "[]"),
+					Dependencies = JsonConvert.DeserializeObject<List<string>>(row.dependencies ?? "[]")
+				};
 			}
 			catch (Exception ex)
 			{
-				_logger.LogError(ex, $"Error updating code chunk {chunk.Id}");
+				_logger.LogError(ex, $"Error getting next unmigrated file for {projectId}");
 				throw;
 			}
 		}
 
+		public async Task UpdateFileStatusAsync(string fileId, MigrationStatus status, string error = null)
+		{
+			try
+			{
+				using var connection = new NpgsqlConnection(_connectionString);
+				await connection.OpenAsync();
+
+				var query = @"UPDATE project_files 
+                             SET migration_status = @Status, 
+                                 error_message = @ErrorMessage,
+                                 updated_at = CURRENT_TIMESTAMP
+                             WHERE id = @FileId";
+
+				await connection.ExecuteAsync(query, new
+				{
+					Status = status.ToString(),
+					ErrorMessage = error,
+					FileId = fileId
+				});
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, $"Error updating file status for {fileId}");
+				throw;
+			}
+		}
+
+		public async Task SaveMigratedFileAsync(ProjectFile file)
+		{
+			try
+			{
+				using var connection = new NpgsqlConnection(_connectionString);
+				await connection.OpenAsync();
+
+				var query = @"UPDATE project_files 
+                             SET migration_status = @Status,
+                                 migrated_at = @MigratedAt,
+                                 dal_output_path = @DalOutputPath,
+                                 bal_output_path = @BalOutputPath,
+                                 migrated_code = @MigratedCode::jsonb,
+                                 updated_at = CURRENT_TIMESTAMP
+                             WHERE id = @Id";
+
+				await connection.ExecuteAsync(query, new
+				{
+					Status = file.MigrationStatus.ToString(),
+					file.MigratedAt,
+					file.DalOutputPath,
+					file.BalOutputPath,
+					MigratedCode = JsonConvert.SerializeObject(file.MigratedCode),
+					file.Id
+				});
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, $"Error saving migrated file {file.Id}");
+				throw;
+			}
+		}
+
+		// Status operations
+		public async Task<MigrationProgress> GetMigrationStatusAsync(string projectId)
+		{
+			try
+			{
+				using var connection = new NpgsqlConnection(_connectionString);
+				await connection.OpenAsync();
+
+				// Get project info
+				var project = await GetMigrationProjectAsync(projectId);
+
+				// Get file counts
+				var query = @"SELECT 
+                    COUNT(*) as total,
+                    COUNT(CASE WHEN migration_status = 'Completed' THEN 1 END) as completed,
+                    COUNT(CASE WHEN migration_status = 'Failed' THEN 1 END) as failed,
+                    COUNT(CASE WHEN migration_status = 'Pending' THEN 1 END) as pending,
+                    MIN(CASE WHEN migration_status = 'Completed' THEN migrated_at END) as first_migrated,
+                    MAX(CASE WHEN migration_status = 'Completed' THEN migrated_at END) as last_migrated
+                FROM project_files 
+                WHERE project_id = @ProjectId 
+                AND file_type NOT IN ('Unknown', 'Model')";
+
+				var stats = await connection.QueryFirstAsync<dynamic>(query, new { ProjectId = projectId });
+
+				var progress = new MigrationProgress
+				{
+					ProjectId = projectId,
+					CurrentStatus = project?.Status.ToString() ?? "Unknown",
+					TotalFiles = (int)stats.total,
+					MigratedFiles = (int)stats.completed,
+					FailedFiles = (int)stats.failed,
+					PendingFiles = (int)stats.pending,
+					DalProjectPath = project?.DalProjectPath,
+					BalProjectPath = project?.BalProjectPath,
+					StartedAt = stats.first_migrated,
+					LastUpdated = stats.last_migrated
+				};
+
+				progress.ProgressPercentage = progress.TotalFiles > 0
+					? (double)progress.MigratedFiles / progress.TotalFiles * 100
+					: 0;
+
+				// Estimate completion
+				if (progress.MigratedFiles > 0 && progress.PendingFiles > 0 &&
+					progress.StartedAt.HasValue && progress.LastUpdated.HasValue)
+				{
+					var elapsedTime = progress.LastUpdated.Value - progress.StartedAt.Value;
+					var avgTimePerFile = elapsedTime.TotalMinutes / progress.MigratedFiles;
+					var estimatedMinutesRemaining = avgTimePerFile * progress.PendingFiles;
+					progress.EstimatedCompletion = DateTime.UtcNow.AddMinutes(estimatedMinutesRemaining);
+				}
+
+				return progress;
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, $"Error getting migration status for {projectId}");
+				throw;
+			}
+		}
+
+		public async Task UpdateMigrationProgressAsync(string projectId)
+		{
+			try
+			{
+				// Get current status
+				var status = await GetMigrationStatusAsync(projectId);
+
+				// Update project status if needed
+				if (status.PendingFiles == 0 && status.TotalFiles > 0)
+				{
+					using var connection = new NpgsqlConnection(_connectionString);
+					await connection.OpenAsync();
+
+					var newStatus = status.FailedFiles > 0 ? ProjectStatus.Failed : ProjectStatus.Completed;
+
+					await connection.ExecuteAsync(
+						"UPDATE migration_projects SET status = @Status WHERE project_id = @ProjectId",
+						new { Status = newStatus.ToString(), ProjectId = projectId });
+				}
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, $"Error updating migration progress for {projectId}");
+				throw;
+			}
+		}
+
+		// Database operations
 		public async Task<bool> TestConnectionAsync()
 		{
 			try
 			{
 				using var connection = new NpgsqlConnection(_connectionString);
 				await connection.OpenAsync();
+
+				// Test with a simple query
+				var result = await connection.ExecuteScalarAsync<int>("SELECT 1");
+
 				_logger.LogInformation("Database connection test successful");
-				return true;
+				return result == 1;
 			}
 			catch (Exception ex)
 			{
@@ -421,106 +484,7 @@ namespace CSharpLegacyMigrationMCP.Data
 			}
 		}
 
-		private async Task SaveCodeStructureInternalAsync(NpgsqlConnection connection, CodeStructure structure)
-		{
-			var structureQuery = @"
-                INSERT INTO code_structures (id, analysis_id, file_path, class_name, namespace_name, structure_type, source_code, 
-                                           is_migrated, migrated_at, migrated_code, complexity_score, dependencies, database_tables)
-                VALUES (@Id, @AnalysisId, @FilePath, @ClassName, @NamespaceName, @StructureType, @SourceCode, 
-                        @IsMigrated, @MigratedAt, @MigratedCode, @ComplexityScore::double precision, @Dependencies::jsonb, @DatabaseTables::jsonb)
-                ON CONFLICT (id) DO UPDATE SET
-                    file_path = @FilePath,
-                    class_name = @ClassName,
-                    namespace_name = @NamespaceName,
-                    structure_type = @StructureType,
-                    source_code = @SourceCode,
-                    is_migrated = @IsMigrated,
-                    migrated_at = @MigratedAt,
-                    migrated_code = @MigratedCode,
-                    complexity_score = @ComplexityScore::double precision,
-                    dependencies = @Dependencies::jsonb,
-                    database_tables = @DatabaseTables::jsonb";
-
-			await connection.ExecuteAsync(structureQuery, new
-			{
-				structure.Id,
-				structure.AnalysisId,
-				structure.FilePath,
-				structure.ClassName,
-				NamespaceName = structure.Namespace,
-				StructureType = structure.Type.ToString(),
-				structure.SourceCode,
-				structure.IsMigrated,
-				structure.MigratedAt,
-				structure.MigratedCode,
-				ComplexityScore = structure.ComplexityScore,
-				Dependencies = JsonConvert.SerializeObject(structure.Dependencies),
-				DatabaseTables = JsonConvert.SerializeObject(structure.DatabaseTables)
-			});
-
-			foreach (var method in structure.Methods)
-			{
-				var methodQuery = @"
-                    INSERT INTO method_structures (id, code_structure_id, name, return_type, lines_of_code, complexity_score, 
-                                                 source_code, has_database_access, is_migrated, migrated_code, dependencies, 
-                                                 database_operations, parameters)
-                    VALUES (@Id, @CodeStructureId, @Name, @ReturnType, @LinesOfCode, @ComplexityScore::double precision, @SourceCode, 
-                            @HasDatabaseAccess, @IsMigrated, @MigratedCode, @Dependencies::jsonb, @DatabaseOperations::jsonb, @Parameters::jsonb)
-                    ON CONFLICT (id) DO UPDATE SET
-                        name = @Name,
-                        return_type = @ReturnType,
-                        lines_of_code = @LinesOfCode,
-                        complexity_score = @ComplexityScore::double precision,
-                        source_code = @SourceCode,
-                        has_database_access = @HasDatabaseAccess,
-                        is_migrated = @IsMigrated,
-                        migrated_code = @MigratedCode,
-                        dependencies = @Dependencies::jsonb,
-                        database_operations = @DatabaseOperations::jsonb,
-                        parameters = @Parameters::jsonb";
-
-				await connection.ExecuteAsync(methodQuery, new
-				{
-					method.Id,
-					CodeStructureId = structure.Id,
-					method.Name,
-					method.ReturnType,
-					method.LinesOfCode,
-					ComplexityScore = method.ComplexityScore,
-					method.SourceCode,
-					method.HasDatabaseAccess,
-					method.IsMigrated,
-					method.MigratedCode,
-					Dependencies = JsonConvert.SerializeObject(method.Dependencies),
-					DatabaseOperations = JsonConvert.SerializeObject(method.DatabaseOperations),
-					Parameters = JsonConvert.SerializeObject(method.Parameters)
-				});
-			}
-
-			foreach (var property in structure.Properties)
-			{
-				var propertyQuery = @"
-                    INSERT INTO property_structures (code_structure_id, name, property_type, has_getter, has_setter, is_public)
-                    VALUES (@CodeStructureId, @Name, @PropertyType, @HasGetter, @HasSetter, @IsPublic)
-                    ON CONFLICT (code_structure_id, name) DO UPDATE SET
-                        property_type = @PropertyType,
-                        has_getter = @HasGetter,
-                        has_setter = @HasSetter,
-                        is_public = @IsPublic";
-
-				await connection.ExecuteAsync(propertyQuery, new
-				{
-					CodeStructureId = structure.Id,
-					property.Name,
-					PropertyType = property.Type,
-					property.HasGetter,
-					property.HasSetter,
-					property.IsPublic
-				});
-			}
-		}
-
-		private async Task InitializeDatabaseAsync()
+		public async Task MigrateAsync()
 		{
 			try
 			{
@@ -528,112 +492,79 @@ namespace CSharpLegacyMigrationMCP.Data
 				await connection.OpenAsync();
 
 				var createTablesScript = @"
-                    -- Analysis Results Table
-                    CREATE TABLE IF NOT EXISTS analysis_results (
-                        id VARCHAR(50) PRIMARY KEY,
-                        directory_path TEXT NOT NULL,
+                    -- Workspace Analysis Table
+                    CREATE TABLE IF NOT EXISTS workspace_analysis (
+                        project_id VARCHAR(50) PRIMARY KEY,
+                        project_name VARCHAR(200) NOT NULL,
+                        workspace_path TEXT NOT NULL,
                         analyzed_at TIMESTAMP NOT NULL,
                         total_files INTEGER NOT NULL,
-                        total_classes INTEGER NOT NULL,
-                        total_methods INTEGER NOT NULL,
-                        complexity_score DOUBLE PRECISION NOT NULL DEFAULT 0,
-                        dependencies JSONB,
+                        files_by_type JSONB,
+                        files_by_complexity JSONB,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
 
-                    -- Code Structures Table
-                    CREATE TABLE IF NOT EXISTS code_structures (
+                    -- Migration Projects Table
+                    CREATE TABLE IF NOT EXISTS migration_projects (
+                        project_id VARCHAR(50) PRIMARY KEY,
+                        project_name VARCHAR(200) NOT NULL,
+                        workspace_path TEXT NOT NULL,
+                        dal_project_path TEXT,
+                        bal_project_path TEXT,
+                        created_at TIMESTAMP NOT NULL,
+                        status VARCHAR(50) NOT NULL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+
+                    -- Project Files Table
+                    CREATE TABLE IF NOT EXISTS project_files (
                         id VARCHAR(50) PRIMARY KEY,
-                        analysis_id VARCHAR(50) NOT NULL REFERENCES analysis_results(id) ON DELETE CASCADE,
+                        project_id VARCHAR(50) NOT NULL,
                         file_path TEXT NOT NULL,
-                        class_name VARCHAR(200),
-                        namespace_name VARCHAR(500),
-                        structure_type VARCHAR(50) NOT NULL,
+                        file_name VARCHAR(200) NOT NULL,
+                        file_type VARCHAR(50) NOT NULL,
                         source_code TEXT,
-                        is_migrated BOOLEAN DEFAULT FALSE,
+                        migration_status VARCHAR(50) NOT NULL DEFAULT 'Pending',
                         migrated_at TIMESTAMP,
-                        migrated_code TEXT,
-                        complexity_score DOUBLE PRECISION DEFAULT 0,
+                        dal_output_path TEXT,
+                        bal_output_path TEXT,
+                        error_message TEXT,
+                        complexity INTEGER DEFAULT 1,
+                        classes JSONB,
                         dependencies JSONB,
-                        database_tables JSONB,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-
-                    -- Method Structures Table
-                    CREATE TABLE IF NOT EXISTS method_structures (
-                        id VARCHAR(50) PRIMARY KEY,
-                        code_structure_id VARCHAR(50) NOT NULL REFERENCES code_structures(id) ON DELETE CASCADE,
-                        name VARCHAR(200) NOT NULL,
-                        return_type VARCHAR(200),
-                        lines_of_code INTEGER DEFAULT 0,
-                        complexity_score DOUBLE PRECISION DEFAULT 0,
-                        source_code TEXT,
-                        has_database_access BOOLEAN DEFAULT FALSE,
-                        is_migrated BOOLEAN DEFAULT FALSE,
-                        migrated_code TEXT,
-                        dependencies JSONB,
-                        database_operations JSONB,
-                        parameters JSONB,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-
-                    -- Property Structures Table
-                    CREATE TABLE IF NOT EXISTS property_structures (
-                        code_structure_id VARCHAR(50) NOT NULL REFERENCES code_structures(id) ON DELETE CASCADE,
-                        name VARCHAR(200) NOT NULL,
-                        property_type VARCHAR(200) NOT NULL,
-                        has_getter BOOLEAN DEFAULT FALSE,
-                        has_setter BOOLEAN DEFAULT FALSE,
-                        is_public BOOLEAN DEFAULT FALSE,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        PRIMARY KEY (code_structure_id, name)
-                    );
-
-                    -- Migration Structures Table
-                    CREATE TABLE IF NOT EXISTS migration_structures (
-                        analysis_id VARCHAR(50) PRIMARY KEY REFERENCES analysis_results(id) ON DELETE CASCADE,
-                        business_logic_interfaces JSONB,
-                        data_access_interfaces JSONB,
-                        models JSONB,
-                        suggested_projects JSONB,
+                        migrated_code JSONB,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
 
-                    -- Code Chunks Table
-                    CREATE TABLE IF NOT EXISTS code_chunks (
-                        id VARCHAR(50) PRIMARY KEY,
-                        analysis_id VARCHAR(50) NOT NULL REFERENCES analysis_results(id) ON DELETE CASCADE,
-                        class_ids JSONB,
-                        combined_code TEXT,
-                        estimated_tokens INTEGER DEFAULT 0,
-                        is_processed BOOLEAN DEFAULT FALSE,
-                        migrated_code TEXT,
-                        errors JSONB,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
+                    -- Create indexes
+                    CREATE INDEX IF NOT EXISTS idx_project_files_project_id ON project_files(project_id);
+                    CREATE INDEX IF NOT EXISTS idx_project_files_status ON project_files(migration_status);
+                    CREATE INDEX IF NOT EXISTS idx_project_files_type ON project_files(file_type);
+                    CREATE INDEX IF NOT EXISTS idx_workspace_analysis_project_name ON workspace_analysis(project_name);
+                    CREATE INDEX IF NOT EXISTS idx_migration_projects_status ON migration_projects(status);
 
-                    -- Migration Status Table
-                    CREATE TABLE IF NOT EXISTS migration_status (
-                        analysis_id VARCHAR(50) PRIMARY KEY REFERENCES analysis_results(id) ON DELETE CASCADE,
-                        total_items INTEGER DEFAULT 0,
-                        migrated_items INTEGER DEFAULT 0,
-                        pending_items INTEGER DEFAULT 0,
-                        failed_items INTEGER DEFAULT 0,
-                        progress_percentage DOUBLE PRECISION DEFAULT 0,
-                        current_phase VARCHAR(100),
-                        errors JSONB,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
+                    -- Create update trigger for updated_at
+                    CREATE OR REPLACE FUNCTION update_updated_at_column()
+                    RETURNS TRIGGER AS $$
+                    BEGIN
+                        NEW.updated_at = CURRENT_TIMESTAMP;
+                        RETURN NEW;
+                    END;
+                    $$ language 'plpgsql';
 
-                    -- Create indexes for better performance
-                    CREATE INDEX IF NOT EXISTS idx_code_structures_analysis_id ON code_structures(analysis_id);
-                    CREATE INDEX IF NOT EXISTS idx_method_structures_code_structure_id ON method_structures(code_structure_id);
-                    CREATE INDEX IF NOT EXISTS idx_property_structures_code_structure_id ON property_structures(code_structure_id);
-                    CREATE INDEX IF NOT EXISTS idx_code_chunks_analysis_id ON code_chunks(analysis_id);
-                    CREATE INDEX IF NOT EXISTS idx_code_chunks_is_processed ON code_chunks(is_processed);
-                    CREATE INDEX IF NOT EXISTS idx_code_structures_is_migrated ON code_structures(is_migrated);
+                    -- Apply trigger to tables
+                    DROP TRIGGER IF EXISTS update_project_files_updated_at ON project_files;
+                    CREATE TRIGGER update_project_files_updated_at 
+                        BEFORE UPDATE ON project_files 
+                        FOR EACH ROW 
+                        EXECUTE FUNCTION update_updated_at_column();
+
+                    DROP TRIGGER IF EXISTS update_migration_projects_updated_at ON migration_projects;
+                    CREATE TRIGGER update_migration_projects_updated_at 
+                        BEFORE UPDATE ON migration_projects 
+                        FOR EACH ROW 
+                        EXECUTE FUNCTION update_updated_at_column();
                 ";
 
 				await connection.ExecuteAsync(createTablesScript);
@@ -646,20 +577,38 @@ namespace CSharpLegacyMigrationMCP.Data
 			}
 		}
 
-		private static double SafeConvertToDouble(object value)
+		// Helper methods
+		private async Task SaveProjectFileAsync(NpgsqlConnection connection, ProjectFile file)
 		{
-			if (value == null) return 0.0;
+			var query = @"
+                INSERT INTO project_files (id, project_id, file_path, file_name, file_type, source_code,
+                                         migration_status, complexity, classes, dependencies)
+                VALUES (@Id, @ProjectId, @FilePath, @FileName, @FileType, @SourceCode,
+                        @MigrationStatus, @Complexity, @Classes::jsonb, @Dependencies::jsonb)
+                ON CONFLICT (id) DO UPDATE SET
+                    file_path = @FilePath,
+                    file_name = @FileName,
+                    file_type = @FileType,
+                    source_code = @SourceCode,
+                    migration_status = @MigrationStatus,
+                    complexity = @Complexity,
+                    classes = @Classes::jsonb,
+                    dependencies = @Dependencies::jsonb,
+                    updated_at = CURRENT_TIMESTAMP";
 
-			return value switch
+			await connection.ExecuteAsync(query, new
 			{
-				double d => d,
-				decimal dec => (double)dec,
-				float f => (double)f,
-				int i => (double)i,
-				long l => (double)l,
-				string s when double.TryParse(s, out var result) => result,
-				_ => 0.0
-			};
+				file.Id,
+				file.ProjectId,
+				file.FilePath,
+				file.FileName,
+				file.FileType,
+				file.SourceCode,
+				MigrationStatus = file.MigrationStatus.ToString(),
+				file.Complexity,
+				Classes = JsonConvert.SerializeObject(file.Classes),
+				Dependencies = JsonConvert.SerializeObject(file.Dependencies)
+			});
 		}
 	}
 }

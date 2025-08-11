@@ -1,15 +1,16 @@
 ﻿using System;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json;
 using System.IO;
 using CSharpLegacyMigrationMCP.Data;
 using CSharpLegacyMigrationMCP.Models;
 using CSharpLegacyMigrationMCP.Services;
-using CSharpLegacyMigrationMCP;
 
 namespace CSharpLegacyMigrationMCP
 {
@@ -22,6 +23,7 @@ namespace CSharpLegacyMigrationMCP
 
 			try
 			{
+				// Temporarily suppress console output during startup
 				Console.SetOut(TextWriter.Null);
 				Console.SetError(TextWriter.Null);
 
@@ -29,13 +31,37 @@ namespace CSharpLegacyMigrationMCP
 
 				using var scope = host.Services.CreateScope();
 
+				// Restore console streams
 				Console.SetOut(originalOut);
 				Console.SetError(originalError);
 
 				var logger = host.Services.GetRequiredService<ILogger<Program>>();
-				logger.LogInformation("WebForm Migration MCP Server starting...");
+				logger.LogInformation("VS Code WebForm Migration MCP Server v2.0.0 starting...");
 
-				Console.Error.WriteLine("WebForm Migration MCP Server starting...");
+				// Test database connection
+				try
+				{
+					var repository = host.Services.GetRequiredService<IDataRepository>();
+					var connectionTest = await repository.TestConnectionAsync();
+
+					if (connectionTest)
+					{
+						logger.LogInformation("Database connection successful");
+						Console.Error.WriteLine("Database connection successful");
+					}
+					else
+					{
+						logger.LogWarning("Database connection failed - some features may not work");
+						Console.Error.WriteLine("Warning: Database connection failed");
+					}
+				}
+				catch (Exception dbEx)
+				{
+					logger.LogError(dbEx, "Database initialization error");
+					Console.Error.WriteLine($"Database error: {dbEx.Message}");
+				}
+
+				Console.Error.WriteLine("VS Code WebForm Migration MCP Server ready...");
 				Console.Error.Flush();
 
 				var server = host.Services.GetRequiredService<MCPServer>();
@@ -45,23 +71,31 @@ namespace CSharpLegacyMigrationMCP
 				{
 					try
 					{
-						Console.Error.WriteLine($"Received: {line}");
-						Console.Error.Flush();
-
 						var response = await server.ProcessRequest(line);
-
-						Console.Error.WriteLine($"Sending: {response.Substring(0, Math.Min(200, response.Length))}...");
-						Console.Error.Flush();
-
 						Console.WriteLine(response);
+						Console.Out.Flush();
+					}
+					catch (JsonException jsonEx)
+					{
+						logger.LogError(jsonEx, "JSON parsing error");
+						var errorResponse = JsonConvert.SerializeObject(new
+						{
+							jsonrpc = "2.0",
+							id = 0,
+							error = new
+							{
+								code = -32700,
+								message = "Parse error",
+								data = jsonEx.Message
+							}
+						}, Formatting.None);
+
+						Console.WriteLine(errorResponse);
 						Console.Out.Flush();
 					}
 					catch (Exception ex)
 					{
-						logger.LogError(ex, "Error processing request: {Request}", line);
-						Console.Error.WriteLine($"Error processing request: {ex.Message}");
-						Console.Error.Flush();
-
+						logger.LogError(ex, "Error processing request");
 						var errorResponse = JsonConvert.SerializeObject(new
 						{
 							jsonrpc = "2.0",
@@ -83,31 +117,21 @@ namespace CSharpLegacyMigrationMCP
 			{
 				Console.SetError(originalError);
 				Console.Error.WriteLine($"Fatal startup error: {ex.Message}");
-				Console.Error.WriteLine($"Stack: {ex.StackTrace}");
-				Console.Error.Flush();
-
-				var errorResponse = JsonConvert.SerializeObject(new
-				{
-					jsonrpc = "2.0",
-					id = 0,
-					error = new
-					{
-						code = -32000,
-						message = "Server startup failed",
-						data = ex.Message
-					}
-				}, Formatting.None);
-
-				Console.WriteLine(errorResponse);
-				Console.Out.Flush();
 				Environment.Exit(1);
 			}
 		}
 
 		static IHostBuilder CreateHostBuilder(string[] args) =>
 			Host.CreateDefaultBuilder(args)
+				.ConfigureAppConfiguration((context, config) =>
+				{
+					config.AddJsonFile("appsettings.json", optional: true, reloadOnChange: true);
+					config.AddEnvironmentVariables("WEBFORM_MIGRATION_");
+					config.AddCommandLine(args);
+				})
 				.ConfigureServices((context, services) =>
 				{
+					// Configure logging
 					services.AddLogging(builder =>
 					{
 						builder.ClearProviders();
@@ -116,26 +140,25 @@ namespace CSharpLegacyMigrationMCP
 						builder.SetMinimumLevel(LogLevel.Information);
 					});
 
+					// Register core services
 					services.AddSingleton<MCPServer>();
-					services.AddScoped<ISourceCodeAnalyzer, RoslynSourceCodeAnalyzer>();
-					services.AddScoped<IMigrationStructureGenerator, MigrationStructureGenerator>();
-					services.AddScoped<ICodeMigrator, ClaudeDesktopMigrator>();
-					services.AddScoped<IMigratedCodeSaver, MigratedCodeSaver>();
+					services.AddScoped<IWorkspaceAnalyzer, WorkspaceAnalyzer>();
+					services.AddScoped<IProjectCreator, ProjectCreator>();
+					services.AddScoped<IFileMigrator, FileMigrator>();
+					services.AddScoped<IMigrationOrchestrator, MigrationOrchestrator>();
 					services.AddScoped<IDataRepository, PostgreSqlRepository>();
+					services.AddScoped<IMigrationPromptBuilder, MigrationPromptBuilder>();
+					services.AddScoped<IDependencyAnalyzer, DependencyAnalyzer>();
 
-					//services.Configure<DatabaseOptions>(
-					//	context.Configuration.GetSection("Database"));
-					services.Configure<DatabaseOptions>(options => {
-						options.ConnectionString = "Host=localhost;Database=webform_migration;Username=postgres;Password=postgres;Port=5432";
-						options.Provider = "PostgreSQL";
-					});
-
-					services.AddScoped<IMigrationStatusService>(provider =>
+					// Configure database options
+					services.Configure<DatabaseOptions>(options =>
 					{
-						var logger = provider.GetRequiredService<ILogger<MigrationStatusService>>();
-						var repository = provider.GetRequiredService<IDataRepository>();
-						var dbOptions = provider.GetRequiredService<IOptions<DatabaseOptions>>();
-						return new MigrationStatusService(logger, repository, dbOptions.Value.ConnectionString);
+						var connectionString = context.Configuration.GetConnectionString("Default") ??
+											   Environment.GetEnvironmentVariable("DATABASE_CONNECTION_STRING") ??
+											   "Host=localhost;Database=webform_migration;Username=postgres;Password=postgres;Port=5432";
+
+						options.ConnectionString = connectionString;
+						options.Provider = "PostgreSQL";
 					});
 				});
 	}

@@ -3,13 +3,12 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using System.Text;
 using System.Linq;
 using CSharpLegacyMigrationMCP.Models;
+using CSharpLegacyMigrationMCP.Services;
 
 namespace CSharpLegacyMigrationMCP
 {
@@ -29,13 +28,14 @@ namespace CSharpLegacyMigrationMCP
 
 		private void RegisterTools()
 		{
-			_tools["analyze_source_code"] = HandleAnalyzeSourceCode;
-			_tools["generate_migration_structure"] = HandleGenerateMigrationStructure;
-			_tools["prepare_migration_chunks"] = HandlePrepareMigrationChunks;
-			_tools["get_next_chunk"] = HandleGetNextChunk;
-			_tools["process_migration_chunk"] = HandleProcessMigrationChunk;
-			_tools["save_migrated_code"] = HandleSaveMigratedCode;
+			_tools["analyze_workspace"] = HandleAnalyzeWorkspace;
+			_tools["start_migration"] = HandleStartMigration;
 			_tools["get_migration_status"] = HandleGetMigrationStatus;
+			_tools["get_next_migration_prompt"] = HandleGetNextMigrationPrompt;
+			_tools["complete_file_migration"] = HandleCompleteFileMigration;
+			_tools["get_file_list"] = HandleGetFileList;
+			_tools["retry_failed_files"] = HandleRetryFailedFiles;
+			_tools["get_project_structure"] = HandleGetProjectStructure;
 		}
 
 		public async Task<string> ProcessRequest(string jsonRequest)
@@ -44,16 +44,14 @@ namespace CSharpLegacyMigrationMCP
 			{
 				var request = JObject.Parse(jsonRequest);
 				var method = request["method"]?.ToString();
-				var id = request["id"];
-
-				var safeId = id ?? 0;
+				var id = request["id"] ?? 0;
 
 				if (method == "initialize")
 				{
 					return JsonConvert.SerializeObject(new
 					{
 						jsonrpc = "2.0",
-						id = safeId,
+						id = id,
 						result = new
 						{
 							protocolVersion = "2024-11-05",
@@ -63,8 +61,9 @@ namespace CSharpLegacyMigrationMCP
 							},
 							serverInfo = new
 							{
-								name = "webform-migration",
-								version = "1.0.0"
+								name = "vscode-webform-migration",
+								version = "2.0.0",
+								description = "VS Code WebForm to DAL/BAL Migration Tool with Direct File Writing"
 							}
 						}
 					}, Formatting.None);
@@ -76,7 +75,7 @@ namespace CSharpLegacyMigrationMCP
 						return JsonConvert.SerializeObject(new
 						{
 							jsonrpc = "2.0",
-							id = safeId,
+							id = id,
 							result = GetToolsList()
 						}, Formatting.None);
 
@@ -92,7 +91,7 @@ namespace CSharpLegacyMigrationMCP
 								return JsonConvert.SerializeObject(new
 								{
 									jsonrpc = "2.0",
-									id = safeId,
+									id = id,
 									result = new
 									{
 										content = new object[]
@@ -112,7 +111,7 @@ namespace CSharpLegacyMigrationMCP
 								return JsonConvert.SerializeObject(new
 								{
 									jsonrpc = "2.0",
-									id = safeId,
+									id = id,
 									error = new
 									{
 										code = -32603,
@@ -127,7 +126,7 @@ namespace CSharpLegacyMigrationMCP
 							return JsonConvert.SerializeObject(new
 							{
 								jsonrpc = "2.0",
-								id = safeId,
+								id = id,
 								error = new
 								{
 									code = -32601,
@@ -136,33 +135,11 @@ namespace CSharpLegacyMigrationMCP
 							}, Formatting.None);
 						}
 
-					case "resources/list":
-						return JsonConvert.SerializeObject(new
-						{
-							jsonrpc = "2.0",
-							id = safeId,
-							result = new
-							{
-								resources = new object[] { }
-							}
-						}, Formatting.None);
-
-					case "prompts/list":
-						return JsonConvert.SerializeObject(new
-						{
-							jsonrpc = "2.0",
-							id = safeId,
-							result = new
-							{
-								prompts = new object[] { }
-							}
-						}, Formatting.None);
-
 					default:
 						return JsonConvert.SerializeObject(new
 						{
 							jsonrpc = "2.0",
-							id = safeId,
+							id = id,
 							error = new
 							{
 								code = -32601,
@@ -196,363 +173,367 @@ namespace CSharpLegacyMigrationMCP
 				{
 					new
 					{
-						name = "analyze_source_code",
-						description = "Analyze C# source code directory using Roslyn metrics",
+						name = "analyze_workspace",
+						description = "Analyze the current VS Code workspace or specified directory",
 						inputSchema = new
 						{
 							type = "object",
 							properties = new Dictionary<string, object>
 							{
-								["directory_path"] = new { type = "string", description = "Path to source code directory" },
-								["include_subdirectories"] = new { type = "boolean", description = "Include subdirectories in analysis" }
+								["workspace_path"] = new { type = "string", description = "Path to workspace folder (defaults to current workspace)" }
 							},
-							required = new string[] { "directory_path" }
+							required = new string[] { }
 						}
 					},
 					new
 					{
-						name = "generate_migration_structure",
-						description = "Generate migration structure based on analyzed code",
+						name = "start_migration",
+						description = "Start the migration process for an analyzed project",
 						inputSchema = new
 						{
 							type = "object",
 							properties = new Dictionary<string, object>
 							{
-								["analysis_id"] = new { type = "string", description = "Analysis ID from previous step" }
+								["project_id"] = new { type = "string", description = "Project ID from analysis" },
+								["create_projects"] = new { type = "boolean", description = "Auto-create DAL/BAL projects (default: true)" }
 							},
-							required = new string[] { "analysis_id" }
-						}
-					},
-					new
-					{
-						name = "prepare_migration_chunks",
-						description = "Prepare code chunks for migration",
-						inputSchema = new
-						{
-							type = "object",
-							properties = new Dictionary<string, object>
-							{
-								["analysis_id"] = new { type = "string", description = "Analysis ID" },
-								["max_tokens_percentage"] = new { type = "number", description = "Max percentage of token limit to use (default: 0.7)" }
-							},
-							required = new string[] { "analysis_id" }
-						}
-					},
-					new
-					{
-						name = "get_next_chunk",
-						description = "Get the next unprocessed code chunk for migration",
-						inputSchema = new
-						{
-							type = "object",
-							properties = new Dictionary<string, object>
-							{
-								["analysis_id"] = new { type = "string", description = "Analysis ID" }
-							},
-							required = new string[] { "analysis_id" }
-						}
-					},
-					new
-					{
-						name = "process_migration_chunk",
-						description = "Mark a chunk as processed and save the migrated code",
-						inputSchema = new
-						{
-							type = "object",
-							properties = new Dictionary<string, object>
-							{
-								["chunk_id"] = new { type = "string", description = "Code chunk ID" },
-								["migrated_code"] = new { type = "string", description = "The migrated code from Claude Desktop" }
-							},
-							required = new string[] { "chunk_id", "migrated_code" }
-						}
-					},
-					new
-					{
-						name = "save_migrated_code",
-						description = "Save migrated code to output directory",
-						inputSchema = new
-						{
-							type = "object",
-							properties = new Dictionary<string, object>
-							{
-								["analysis_id"] = new { type = "string", description = "Analysis ID" },
-								["output_directory"] = new { type = "string", description = "Output directory path" }
-							},
-							required = new string[] { "analysis_id", "output_directory" }
+							required = new string[] { "project_id" }
 						}
 					},
 					new
 					{
 						name = "get_migration_status",
-						description = "Get current migration status",
+						description = "Get current migration status and progress",
 						inputSchema = new
 						{
 							type = "object",
 							properties = new Dictionary<string, object>
 							{
-								["analysis_id"] = new { type = "string", description = "Analysis ID" }
+								["project_id"] = new { type = "string", description = "Project ID" }
 							},
-							required = new string[] { "analysis_id" }
+							required = new string[] { "project_id" }
+						}
+					},
+					new
+					{
+						name = "get_next_migration_prompt",
+						description = "Get the next file to migrate with complete prompt for AI to process and write files directly",
+						inputSchema = new
+						{
+							type = "object",
+							properties = new Dictionary<string, object>
+							{
+								["project_id"] = new { type = "string", description = "Project ID" }
+							},
+							required = new string[] { "project_id" }
+						}
+					},
+					new
+					{
+						name = "complete_file_migration",
+						description = "Mark a file migration as completed after AI has written the files directly",
+						inputSchema = new
+						{
+							type = "object",
+							properties = new Dictionary<string, object>
+							{
+								["project_id"] = new { type = "string", description = "Project ID" },
+								["file_id"] = new { type = "string", description = "File ID that was migrated" },
+								["migration_notes"] = new { type = "string", description = "Optional notes about the migration" }
+							},
+							required = new string[] { "project_id", "file_id" }
+						}
+					},
+					new
+					{
+						name = "get_file_list",
+						description = "Get list of all files with their migration status",
+						inputSchema = new
+						{
+							type = "object",
+							properties = new Dictionary<string, object>
+							{
+								["project_id"] = new { type = "string", description = "Project ID" },
+								["status_filter"] = new { type = "string", description = "Filter by status: all, migrated, pending, failed" }
+							},
+							required = new string[] { "project_id" }
+						}
+					},
+					new
+					{
+						name = "retry_failed_files",
+						description = "Retry migration for failed files",
+						inputSchema = new
+						{
+							type = "object",
+							properties = new Dictionary<string, object>
+							{
+								["project_id"] = new { type = "string", description = "Project ID" }
+							},
+							required = new string[] { "project_id" }
+						}
+					},
+					new
+					{
+						name = "get_project_structure",
+						description = "Get current project structure and existing files for reference",
+						inputSchema = new
+						{
+							type = "object",
+							properties = new Dictionary<string, object>
+							{
+								["project_id"] = new { type = "string", description = "Project ID" }
+							},
+							required = new string[] { "project_id" }
 						}
 					}
 				}
 			};
 		}
 
-		private async Task<object> HandleAnalyzeSourceCode(JObject args)
+		private async Task<object> HandleAnalyzeWorkspace(JObject args)
 		{
 			try
 			{
-				var directoryPath = args["directory_path"]?.ToString();
-				var includeSubdirectories = args["include_subdirectories"]?.ToObject<bool>() ?? true;
+				var workspacePath = args["workspace_path"]?.ToString();
 
-				if (string.IsNullOrEmpty(directoryPath))
+				if (string.IsNullOrEmpty(workspacePath))
 				{
-					throw new ArgumentException("directory_path is required");
+					workspacePath = Environment.CurrentDirectory;
 				}
 
-				var analyzer = _serviceProvider.GetRequiredService<ISourceCodeAnalyzer>();
-				var analysisResult = await analyzer.AnalyzeDirectoryAsync(directoryPath, includeSubdirectories);
+				_logger.LogInformation($"Analyzing workspace: {workspacePath}");
+
+				var analyzer = _serviceProvider.GetRequiredService<IWorkspaceAnalyzer>();
+				var analysis = await analyzer.AnalyzeWorkspaceAsync(workspacePath);
 
 				return new
 				{
-					analysis_id = analysisResult.Id,
+					success = true,
+					project_id = analysis.ProjectId,
+					project_name = analysis.ProjectName,
+					workspace_path = analysis.WorkspacePath,
 					summary = new
 					{
-						total_files = analysisResult.TotalFiles,
-						total_classes = analysisResult.TotalClasses,
-						total_methods = analysisResult.TotalMethods,
-						complexity_score = analysisResult.ComplexityScore
+						total_files = analysis.TotalFiles,
+						cs_files = analysis.CsFiles.Count,
+						aspx_files = analysis.AspxFiles.Count,
+						ascx_files = analysis.AscxFiles.Count,
+						web_forms = analysis.WebForms.Count,
+						data_access_files = analysis.DataAccessFiles.Count,
+						business_logic_files = analysis.BusinessLogicFiles.Count
 					},
-					message = "Source code analysis completed successfully"
-				};
-			}
-			catch (Exception ex)
-			{
-				_logger.LogError(ex, "Error in HandleAnalyzeSourceCode");
-				return new
-				{
-					error = true,
-					message = ex.Message
-				};
-			}
-		}
-
-		private async Task<object> HandleGenerateMigrationStructure(JObject args)
-		{
-			try
-			{
-				var analysisId = args["analysis_id"]?.ToString();
-
-				if (string.IsNullOrEmpty(analysisId))
-				{
-					throw new ArgumentException("analysis_id is required");
-				}
-
-				var structureGenerator = _serviceProvider.GetRequiredService<IMigrationStructureGenerator>();
-				var structure = await structureGenerator.GenerateStructureAsync(analysisId);
-
-				return new
-				{
-					structure_generated = true,
-					business_logic_interfaces = structure.BusinessLogicInterfaces.Count,
-					data_access_interfaces = structure.DataAccessInterfaces.Count,
-					models = structure.Models.Count,
-					message = "Migration structure generated successfully"
-				};
-			}
-			catch (Exception ex)
-			{
-				_logger.LogError(ex, "Error in HandleGenerateMigrationStructure");
-				return new
-				{
-					error = true,
-					message = ex.Message
-				};
-			}
-		}
-
-		private async Task<object> HandlePrepareMigrationChunks(JObject args)
-		{
-			try
-			{
-				var analysisId = args["analysis_id"]?.ToString();
-				var maxTokensPercentage = args["max_tokens_percentage"]?.ToObject<double>() ?? 0.7;
-
-				if (string.IsNullOrEmpty(analysisId))
-				{
-					throw new ArgumentException("analysis_id is required");
-				}
-
-				var migrator = _serviceProvider.GetRequiredService<ICodeMigrator>();
-				var result = await migrator.MigrateCodeChunksAsync(analysisId, maxTokensPercentage);
-
-				return new
-				{
-					chunks_prepared = true,
-					total_chunks = result.ChunksProcessed + result.ChunksRemaining,
-					chunks_remaining = result.ChunksRemaining,
-					message = result.ChunksRemaining > 0 ?
-						$"Prepared {result.ChunksRemaining} chunks for migration. Use 'get_next_chunk' to start processing." :
-						"All chunks already processed."
-				};
-			}
-			catch (Exception ex)
-			{
-				_logger.LogError(ex, "Error in HandlePrepareMigrationChunks");
-				return new
-				{
-					error = true,
-					message = ex.Message
-				};
-			}
-		}
-
-		private async Task<object> HandleGetNextChunk(JObject args)
-		{
-			try
-			{
-				var analysisId = args["analysis_id"]?.ToString();
-
-				if (string.IsNullOrEmpty(analysisId))
-				{
-					throw new ArgumentException("analysis_id is required");
-				}
-
-				var repository = _serviceProvider.GetRequiredService<IDataRepository>();
-				var codeChunks = await repository.GetCodeChunksAsync(analysisId);
-				var nextChunk = codeChunks.FirstOrDefault(c => !c.IsProcessed);
-
-				if (nextChunk == null)
-				{
-					return new
+					file_breakdown = new
 					{
-						has_next_chunk = false,
-						message = "No more chunks to process. All migration chunks completed!"
-					};
+						by_type = analysis.FilesByType,
+						by_complexity = analysis.FilesByComplexity
+					},
+					next_step = "Use 'start_migration' with the project_id to begin migration"
+				};
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, "Error analyzing workspace");
+				return new
+				{
+					success = false,
+					error = ex.Message
+				};
+			}
+		}
+
+		private async Task<object> HandleStartMigration(JObject args)
+		{
+			try
+			{
+				var projectId = args["project_id"]?.ToString();
+				var createProjects = args["create_projects"]?.ToObject<bool>() ?? true;
+
+				if (string.IsNullOrEmpty(projectId))
+				{
+					throw new ArgumentException("project_id is required");
 				}
 
-				var migrationStructure = await repository.GetMigrationStructureAsync(analysisId);
-				var context = BuildMigrationContext(migrationStructure);
+				var orchestrator = _serviceProvider.GetRequiredService<IMigrationOrchestrator>();
+				var result = await orchestrator.StartMigrationAsync(projectId, createProjects);
 
 				return new
 				{
-					has_next_chunk = true,
-					chunk_id = nextChunk.Id,
-					estimated_tokens = nextChunk.EstimatedTokens,
-					context = context,
-					code_to_migrate = nextChunk.CombinedCode,
-					migration_prompt = BuildMigrationPrompt(nextChunk.CombinedCode, context),
-					progress = new
+					success = result.Success,
+					project_id = projectId,
+					projects_created = result.ProjectsCreated,
+					dal_project_path = result.DalProjectPath,
+					bal_project_path = result.BalProjectPath,
+					total_files_to_migrate = result.TotalFilesToMigrate,
+					status = "Migration started",
+					next_step = "Use 'get_next_migration_prompt' to get files to migrate with AI prompts",
+					workflow = new
 					{
-						total_chunks = codeChunks.Count,
-						completed_chunks = codeChunks.Count(c => c.IsProcessed),
-						remaining_chunks = codeChunks.Count(c => !c.IsProcessed)
+						step1 = "Call 'get_next_migration_prompt' to get the next file and its migration prompt",
+						step2 = "Process the prompt with AI to write files directly to the target projects",
+						step3 = "Call 'complete_file_migration' to mark the file as completed",
+						step4 = "Repeat until all files are migrated"
 					}
 				};
 			}
 			catch (Exception ex)
 			{
-				_logger.LogError(ex, "Error in HandleGetNextChunk");
+				_logger.LogError(ex, "Error starting migration");
 				return new
 				{
-					error = true,
-					message = ex.Message
+					success = false,
+					error = ex.Message
 				};
 			}
 		}
 
-		private async Task<object> HandleProcessMigrationChunk(JObject args)
+		private async Task<object> HandleGetNextMigrationPrompt(JObject args)
 		{
 			try
 			{
-				var chunkId = args["chunk_id"]?.ToString();
-				var migratedCode = args["migrated_code"]?.ToString();
+				var projectId = args["project_id"]?.ToString();
 
-				if (string.IsNullOrEmpty(chunkId) || string.IsNullOrEmpty(migratedCode))
+				if (string.IsNullOrEmpty(projectId))
 				{
-					throw new ArgumentException("chunk_id and migrated_code are required");
+					throw new ArgumentException("project_id is required");
 				}
 
 				var repository = _serviceProvider.GetRequiredService<IDataRepository>();
-				var statusService = _serviceProvider.GetRequiredService<IMigrationStatusService>();
+				var migrator = _serviceProvider.GetRequiredService<IFileMigrator>();
 
-				var allChunks = await repository.GetCodeChunksAsync("");
-				var chunk = allChunks.FirstOrDefault(c => c.Id == chunkId);
+				// Get next unmigrated file
+				var file = await repository.GetNextUnmigratedFileAsync(projectId);
 
-				if (chunk == null)
+				if (file == null)
 				{
-					return new { error = true, message = "Chunk not found" };
+					// No more files to migrate
+					var status = await repository.GetMigrationStatusAsync(projectId);
+					return new
+					{
+						success = true,
+						migration_complete = true,
+						message = "All files have been migrated!",
+						total_migrated = status.MigratedFiles,
+						total_failed = status.FailedFiles
+					};
 				}
 
-				chunk.MigratedCode = migratedCode;
-				chunk.IsProcessed = true;
-				await repository.UpdateCodeChunkAsync(chunk);
+				// Get project info
+				var project = await repository.GetMigrationProjectAsync(projectId);
 
-				var allAnalysisChunks = await repository.GetCodeChunksAsync(chunk.AnalysisId);
-				var completed = allAnalysisChunks.Count(c => c.IsProcessed);
-				var total = allAnalysisChunks.Count;
+				// Get the migration result with prompt
+				var result = await migrator.MigrateFileAsync(file, project);
 
-				await statusService.UpdateStatusAsync(chunk.AnalysisId, "Processing Migration", completed, total);
+				if (!result.Success)
+				{
+					return new
+					{
+						success = false,
+						error = result.Error
+					};
+				}
 
 				return new
 				{
 					success = true,
-					chunk_processed = true,
-					progress = new
+					file_info = new
 					{
-						total_chunks = total,
-						completed_chunks = completed,
-						remaining_chunks = total - completed,
-						progress_percentage = total > 0 ? (double)completed / total * 100 : 100
+						file_id = file.Id,
+						file_path = file.FilePath,
+						file_name = file.FileName,
+						file_type = file.FileType,
+						complexity = file.Complexity
 					},
-					message = total - completed > 0 ?
-						$"Chunk processed successfully. {total - completed} chunks remaining." :
-						"All chunks completed! You can now save the migrated code."
+					project_info = new
+					{
+						dal_project_path = project.DalProjectPath,
+						bal_project_path = project.BalProjectPath,
+						project_name = project.ProjectName
+					},
+					migration_prompt = result.MigrationPrompt,
+					instructions = new
+					{
+						message = "Process the migration_prompt with AI. The AI should write files directly to the specified project paths.",
+						next_step = "After AI completes file writing, call 'complete_file_migration' with the file_id to mark as completed",
+						ai_instructions = "The AI has direct file system access and should create files immediately at the specified DAL/BAL project paths."
+					}
 				};
 			}
 			catch (Exception ex)
 			{
-				_logger.LogError(ex, "Error in HandleProcessMigrationChunk");
+				_logger.LogError(ex, "Error getting next migration prompt");
 				return new
 				{
-					error = true,
-					message = ex.Message
+					success = false,
+					error = ex.Message
 				};
 			}
 		}
 
-		private async Task<object> HandleSaveMigratedCode(JObject args)
+		private async Task<object> HandleCompleteFileMigration(JObject args)
 		{
 			try
 			{
-				var analysisId = args["analysis_id"]?.ToString();
-				var outputDirectory = args["output_directory"]?.ToString();
+				var projectId = args["project_id"]?.ToString();
+				var fileId = args["file_id"]?.ToString();
+				var migrationNotes = args["migration_notes"]?.ToString();
 
-				if (string.IsNullOrEmpty(analysisId) || string.IsNullOrEmpty(outputDirectory))
+				if (string.IsNullOrEmpty(projectId) || string.IsNullOrEmpty(fileId))
 				{
-					throw new ArgumentException("analysis_id and output_directory are required");
+					throw new ArgumentException("project_id and file_id are required");
 				}
 
-				var codeSaver = _serviceProvider.GetRequiredService<IMigratedCodeSaver>();
-				var result = await codeSaver.SaveMigratedCodeAsync(analysisId, outputDirectory);
+				var repository = _serviceProvider.GetRequiredService<IDataRepository>();
+				var migrator = _serviceProvider.GetRequiredService<IFileMigrator>();
+
+				// Get the file and project
+				var files = await repository.GetProjectFilesAsync(projectId);
+				var file = files.FirstOrDefault(f => f.Id == fileId);
+
+				if (file == null)
+				{
+					throw new ArgumentException($"File not found: {fileId}");
+				}
+
+				var project = await repository.GetMigrationProjectAsync(projectId);
+
+				// Process completion (this will verify created files)
+				var result = await migrator.ProcessAiResponseAsync(file, project, migrationNotes ?? "Migration completed");
 
 				return new
 				{
-					files_saved = result.FilesSaved,
-					output_directory = result.OutputDirectory,
-					web_form_generated = result.WebFormGenerated,
-					message = "Migrated code saved successfully"
+					success = result.Success,
+					file_completed = result.Success,
+					file_info = new
+					{
+						file_path = result.CurrentFile?.FilePath,
+						file_name = result.CurrentFile?.FileName,
+						file_type = result.CurrentFile?.FileType
+					},
+					migration_result = result.Success ? new
+					{
+						dal_files_created = result.DalFilesCreated,
+						bal_files_created = result.BalFilesCreated,
+						interfaces_created = result.InterfacesCreated
+					} : null,
+					error = result.Error,
+					progress = new
+					{
+						files_migrated = result.FilesMigrated,
+						files_remaining = result.FilesRemaining,
+						progress_percentage = result.ProgressPercentage
+					},
+					has_more_files = result.HasMoreFiles,
+					next_action = result.HasMoreFiles ? "Call 'get_next_migration_prompt' for the next file" : "Migration complete!"
 				};
 			}
 			catch (Exception ex)
 			{
-				_logger.LogError(ex, "Error in HandleSaveMigratedCode");
+				_logger.LogError(ex, "Error completing file migration");
 				return new
 				{
-					error = true,
-					message = ex.Message
+					success = false,
+					error = ex.Message
 				};
 			}
 		}
@@ -561,120 +542,249 @@ namespace CSharpLegacyMigrationMCP
 		{
 			try
 			{
-				var analysisId = args["analysis_id"]?.ToString();
+				var projectId = args["project_id"]?.ToString();
 
-				if (string.IsNullOrEmpty(analysisId))
+				if (string.IsNullOrEmpty(projectId))
 				{
-					throw new ArgumentException("analysis_id is required");
+					throw new ArgumentException("project_id is required");
 				}
 
-				var statusService = _serviceProvider.GetRequiredService<IMigrationStatusService>();
-				var status = await statusService.GetStatusAsync(analysisId);
+				var repository = _serviceProvider.GetRequiredService<IDataRepository>();
+				var status = await repository.GetMigrationStatusAsync(projectId);
 
 				return new
 				{
-					analysis_id = analysisId,
-					total_items = status.TotalItems,
-					migrated_items = status.MigratedItems,
-					pending_items = status.PendingItems,
-					failed_items = status.FailedItems,
-					progress_percentage = status.ProgressPercentage,
-					current_phase = status.CurrentPhase,
-					errors = status.Errors
+					success = true,
+					project_id = projectId,
+					status = status.CurrentStatus,
+					progress = new
+					{
+						total_files = status.TotalFiles,
+						migrated_files = status.MigratedFiles,
+						failed_files = status.FailedFiles,
+						pending_files = status.PendingFiles,
+						progress_percentage = status.ProgressPercentage
+					},
+					projects = new
+					{
+						dal_project = status.DalProjectPath,
+						bal_project = status.BalProjectPath
+					},
+					started_at = status.StartedAt,
+					last_updated = status.LastUpdated,
+					estimated_completion = status.EstimatedCompletion
 				};
 			}
 			catch (Exception ex)
 			{
-				_logger.LogError(ex, "Error in HandleGetMigrationStatus");
+				_logger.LogError(ex, "Error getting migration status");
 				return new
 				{
-					error = true,
-					message = ex.Message
+					success = false,
+					error = ex.Message
 				};
 			}
 		}
 
-		private string BuildMigrationContext(MigrationStructure migrationStructure)
+		private async Task<object> HandleGetFileList(JObject args)
 		{
-			if (migrationStructure == null)
-				return string.Empty;
-
-			var sb = new StringBuilder();
-
-			sb.AppendLine("MIGRATION CONTEXT:");
-			sb.AppendLine("You are helping migrate legacy .NET 4.8 WebForms code to a modern layered architecture.");
-			sb.AppendLine();
-
-			sb.AppendLine("TARGET ARCHITECTURE:");
-			sb.AppendLine("- Separate Business Logic from Data Access");
-			sb.AppendLine("- Use async/await patterns");
-			sb.AppendLine("- Follow dependency injection principles");
-			sb.AppendLine("- Create clean, testable interfaces");
-			sb.AppendLine();
-
-			if (migrationStructure.DataAccessInterfaces.Any())
+			try
 			{
-				sb.AppendLine("DATA ACCESS INTERFACES TO IMPLEMENT:");
-				foreach (var da in migrationStructure.DataAccessInterfaces.Take(3))
-				{
-					sb.AppendLine($"- {da.Name} (Purpose: {da.Purpose})");
-				}
-				if (migrationStructure.DataAccessInterfaces.Count > 3)
-				{
-					sb.AppendLine($"- ... and {migrationStructure.DataAccessInterfaces.Count - 3} more interfaces");
-				}
-				sb.AppendLine();
-			}
+				var projectId = args["project_id"]?.ToString();
+				var statusFilter = args["status_filter"]?.ToString() ?? "all";
 
-			if (migrationStructure.BusinessLogicInterfaces.Any())
+				if (string.IsNullOrEmpty(projectId))
+				{
+					throw new ArgumentException("project_id is required");
+				}
+
+				var repository = _serviceProvider.GetRequiredService<IDataRepository>();
+				var files = await repository.GetProjectFilesAsync(projectId, statusFilter);
+
+				return new
+				{
+					success = true,
+					project_id = projectId,
+					filter = statusFilter,
+					total_files = files.Count,
+					files = files.Select(f => new
+					{
+						file_id = f.Id,
+						file_path = f.FilePath,
+						file_name = f.FileName,
+						file_type = f.FileType,
+						status = f.MigrationStatus.ToString(),
+						migrated_at = f.MigratedAt,
+						dal_output_files = f.DalOutputPath?.Split(';').Where(s => !string.IsNullOrEmpty(s)),
+						bal_output_files = f.BalOutputPath?.Split(';').Where(s => !string.IsNullOrEmpty(s)),
+						error = f.ErrorMessage,
+						complexity = f.Complexity
+					})
+				};
+			}
+			catch (Exception ex)
 			{
-				sb.AppendLine("BUSINESS LOGIC INTERFACES TO IMPLEMENT:");
-				foreach (var bl in migrationStructure.BusinessLogicInterfaces.Take(3))
+				_logger.LogError(ex, "Error getting file list");
+				return new
 				{
-					sb.AppendLine($"- {bl.Name} (Purpose: {bl.Purpose})");
-				}
-				if (migrationStructure.BusinessLogicInterfaces.Count > 3)
-				{
-					sb.AppendLine($"- ... and {migrationStructure.BusinessLogicInterfaces.Count - 3} more interfaces");
-				}
-				sb.AppendLine();
+					success = false,
+					error = ex.Message
+				};
 			}
-
-			return sb.ToString();
 		}
 
-		private string BuildMigrationPrompt(string codeChunk, string context)
+		private async Task<object> HandleRetryFailedFiles(JObject args)
 		{
-			var sb = new StringBuilder();
+			try
+			{
+				var projectId = args["project_id"]?.ToString();
 
-			sb.AppendLine(context);
-			sb.AppendLine("INSTRUCTIONS:");
-			sb.AppendLine("1. Analyze the provided legacy code");
-			sb.AppendLine("2. Separate business logic from data access");
-			sb.AppendLine("3. Create appropriate interface implementations");
-			sb.AppendLine("4. Use async/await patterns where appropriate");
-			sb.AppendLine("5. Remove direct database dependencies from business logic");
-			sb.AppendLine("6. Follow SOLID principles");
-			sb.AppendLine("7. Add proper error handling and logging");
-			sb.AppendLine("8. Provide XML documentation for public methods");
-			sb.AppendLine();
+				if (string.IsNullOrEmpty(projectId))
+				{
+					throw new ArgumentException("project_id is required");
+				}
 
-			sb.AppendLine("LEGACY CODE TO MIGRATE:");
-			sb.AppendLine("```csharp");
-			sb.AppendLine(codeChunk);
-			sb.AppendLine("```");
-			sb.AppendLine();
+				var orchestrator = _serviceProvider.GetRequiredService<IMigrationOrchestrator>();
+				var result = await orchestrator.RetryFailedFilesAsync(projectId);
 
-			sb.AppendLine("Please provide the migrated code with:");
-			sb.AppendLine("- Separate interface definitions");
-			sb.AppendLine("- Implementation classes");
-			sb.AppendLine("- Proper dependency injection setup");
-			sb.AppendLine("- Clear separation of concerns");
-			sb.AppendLine("- Modern C# patterns and best practices");
-			sb.AppendLine();
-			sb.AppendLine("Format your response as ready-to-use C# code files.");
+				return new
+				{
+					success = true,
+					failed_files_found = result.FailedFilesCount,
+					retry_started = result.RetryStarted,
+					message = result.RetryStarted ?
+						$"Started retry for {result.FailedFilesCount} failed files. Use 'get_next_migration_prompt' to continue." :
+						"No failed files found to retry."
+				};
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, "Error retrying failed files");
+				return new
+				{
+					success = false,
+					error = ex.Message
+				};
+			}
+		}
 
-			return sb.ToString();
+		private async Task<object> HandleGetProjectStructure(JObject args)
+		{
+			try
+			{
+				var projectId = args["project_id"]?.ToString();
+
+				if (string.IsNullOrEmpty(projectId))
+				{
+					throw new ArgumentException("project_id is required");
+				}
+
+				var repository = _serviceProvider.GetRequiredService<IDataRepository>();
+				var project = await repository.GetMigrationProjectAsync(projectId);
+
+				if (project == null)
+				{
+					throw new ArgumentException($"Project not found: {projectId}");
+				}
+
+				var projectStructure = new
+				{
+					project_info = new
+					{
+						project_id = project.ProjectId,
+						project_name = project.ProjectName,
+						workspace_path = project.WorkspacePath,
+						dal_project_path = project.DalProjectPath,
+						bal_project_path = project.BalProjectPath,
+						status = project.Status.ToString()
+					},
+					dal_structure = GetDirectoryStructure(project.DalProjectPath),
+					bal_structure = GetDirectoryStructure(project.BalProjectPath),
+					existing_files = new
+					{
+						dal_files = GetExistingFiles(project.DalProjectPath),
+						bal_files = GetExistingFiles(project.BalProjectPath)
+					}
+				};
+
+				return new
+				{
+					success = true,
+					project_structure = projectStructure
+				};
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, "Error getting project structure");
+				return new
+				{
+					success = false,
+					error = ex.Message
+				};
+			}
+		}
+
+		private object GetDirectoryStructure(string projectPath)
+		{
+			if (string.IsNullOrEmpty(projectPath) || !Directory.Exists(projectPath))
+			{
+				return new { exists = false, directories = new string[0] };
+			}
+
+			try
+			{
+				var directories = Directory.GetDirectories(projectPath, "*", SearchOption.AllDirectories)
+					.Where(d => !d.Contains("bin") && !d.Contains("obj"))
+					.Select(d => Path.GetRelativePath(projectPath, d))
+					.ToArray();
+
+				return new
+				{
+					exists = true,
+					base_path = projectPath,
+					directories = directories
+				};
+			}
+			catch (Exception ex)
+			{
+				_logger.LogWarning(ex, $"Error scanning directory structure: {projectPath}");
+				return new { exists = false, error = ex.Message };
+			}
+		}
+
+		private object GetExistingFiles(string projectPath)
+		{
+			if (string.IsNullOrEmpty(projectPath) || !Directory.Exists(projectPath))
+			{
+				return new { exists = false, files = new string[0] };
+			}
+
+			try
+			{
+				var files = Directory.GetFiles(projectPath, "*.cs", SearchOption.AllDirectories)
+					.Where(f => !f.Contains("\\bin\\") && !f.Contains("\\obj\\") &&
+							   !f.Contains("/bin/") && !f.Contains("/obj/"))
+					.Select(f => new
+					{
+						relative_path = Path.GetRelativePath(projectPath, f),
+						file_name = Path.GetFileName(f),
+						last_modified = File.GetLastWriteTime(f),
+						size_bytes = new FileInfo(f).Length
+					})
+					.ToArray();
+
+				return new
+				{
+					exists = true,
+					file_count = files.Length,
+					files = files
+				};
+			}
+			catch (Exception ex)
+			{
+				_logger.LogWarning(ex, $"Error scanning existing files: {projectPath}");
+				return new { exists = false, error = ex.Message };
+			}
 		}
 	}
 }
